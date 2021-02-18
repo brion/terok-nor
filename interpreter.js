@@ -99,7 +99,6 @@ class Instance {
         this._table = null;
 
         this._ops = null;
-        this._memoryOps = null;
 
         this.isReady = false;
         this.ready = b.ready.then(async () => {
@@ -183,7 +182,6 @@ class Instance {
             // Now that we have memory, create the ops module
             // This implements unary, binary, and load/store ops via sync WebAssembly
             this._ops = buildOpsModule(this._memory);
-            this._memoryOps = buildMemoryOps(this._ops);
 
             // Set up the exports...
             for (let i = 0; i < mod.getNumExports(); i++) {
@@ -474,7 +472,6 @@ class Frame {
     constructor(instance, func=null, args=[]) {
         this._instance = instance;
         this._ops = instance._ops;
-        this._memoryOps = instance._memoryOps;
         this._func = func;
 
         if (func) {
@@ -636,7 +633,7 @@ class Frame {
     async _executeLoad(expr) {
         const ptr = await this.evaluate(expr.ptr);
         const offset = expr.offset;
-        const func = this._memoryOps.load[expr.type][expr.bytes << 3][expr.isSigned ? 'signed' : 'unsigned'];
+        const func = this._ops.memory.load[expr.type][expr.bytes << 3][expr.isSigned ? 'signed' : 'unsigned'];
         const value = func(ptr + offset);
         this.stack.push(value);
     }
@@ -646,7 +643,7 @@ class Frame {
         const offset = expr.offset;
         const value = await this.evaluate(expr.value);
         const valueInfo = b.getExpressionInfo(expr.value);
-        const func = this._memoryOps.store[valueInfo.type][expr.bytes << 3];
+        const func = this._ops.memory.store[valueInfo.type][expr.bytes << 3];
         func(ptr + offset, value);
     }
 
@@ -661,16 +658,16 @@ class Frame {
 
     async _executeUnary(expr) {
         const value = await this.evaluate(expr.value);
-        const func = "unary" + expr.id;
-        const result = this._ops[func](value);
+        const func = this._ops.unary[expr.id];
+        const result = func(value);
         this.stack.push(result);
     }
 
     async _executeBinary(expr) {
         const left = await this.evaluate(expr.left);
         const right = await this.evaluate(expr.right);
-        const func = "binary" + expr.id;
-        const result = this._ops[func](left, right);
+        const func = this._ops.binary[expr.id];
+        const result = func(left, right);
         this.stack.push(result);
     }
 
@@ -902,7 +899,21 @@ function buildOpsModule(memory) {
             memory
         }
     });
-    return instance.exports;
+
+    function maxOp(list) {
+        return Math.max.apply(null, list.map(([op]) => op));
+    }
+    function opArray(prefix, list) {
+        let ops = new Array(maxOp(unaryOps));
+        for (let [op] of list) {
+            ops[op] = instance.exports[prefix + op];
+        }
+    }
+    return {
+        unary: opArray('unary', unaryOps),
+        binary: opArray('binary', binaryOps),
+        memory: buildMemoryOps(instance.exports)
+    };
 }
 
 function buildMemoryOps(ops) {
