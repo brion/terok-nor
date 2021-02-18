@@ -26,19 +26,19 @@ class Table {
         });
     }
 
-    get(index) {
-        index = Number(index);
-        if (index !== index || index < 0 || index > this.length) {
-            throw new RangeError('out of range');
+    _validateRange(index) {
+        if (index < 0 || index >= this.length) {
+            throw new RangeError('index out of range');
         }
+    }
+
+    get(index) {
+        this._validateRange(index);
         return this._values[index];
     }
 
     set(index, value) {
-        index = Number(index);
-        if (index !== index || index < 0 || index > this.length) {
-            throw new RangeError('out of range');
-        }
+        this._validateRange(index);
         if (this.element === 'anyfunc' && !(value instanceof Function)) {
             throw new TypeError('not a function');
         }
@@ -49,7 +49,7 @@ class Table {
         if (this._maximum && this.length + number > this._maximum) {
             throw new RangeError('out of range');
         }
-        while (this.length < number) {
+        for (let i = 0; i < number; i++) {
             this._values.push(null);
         }
     }
@@ -69,7 +69,7 @@ function normalizeBuffer(bufferSource) {
 /// Module class for reading a WebAssembly module.
 class Module {
     constructor(bufferSource) {
-        this._module = null;
+        this._mod = null;
 
         let input = normalizeBuffer(bufferSource);
         if (!b.isReady) {
@@ -79,7 +79,7 @@ class Module {
 
         this.isReady = false;
         this.ready = b.ready.then(async () => {
-            this._module = b.readBinary(input);
+            this._mod = b.readBinary(input);
             this.isReady = true;
         });
     }
@@ -87,12 +87,9 @@ class Module {
 
 class Instance {
     constructor(module, imports) {
-        if (!b.isReady) {
-            throw new Error("Must wait until ready");
-        }
         this.exports = {};
 
-        this._module = module;
+        this._mod = module._mod;
         this._globals = {};
         this._funcs = {};
         this._thunks = {};
@@ -100,12 +97,13 @@ class Instance {
         // @todo support multiples
         this._memory = null;
         this._table = null;
+
         this._ops = null;
         this._memoryOps = null;
 
         this.isReady = false;
         this.ready = b.ready.then(async () => {
-            const mod = this._module._module;
+            const mod = this._mod;
 
             // Prep internally-callable functions
             for (let i = 0; i < mod.getNumFunctions(); i++) {
@@ -221,7 +219,7 @@ class Instance {
     // things change.
     async _lazyInitGlobal(name) {
         if (!this._globals[name]) {
-            const ref = this._module._module.getGlobal(name);
+            const ref = this._mod.getGlobal(name);
             const info = b.getGlobalInfo(ref);
             const frame = new Frame(this);
             const init = await frame.evaluate(info.init);
@@ -474,9 +472,7 @@ class Stack {
 /// Not meant to be exposed externally.
 class Frame {
     constructor(instance, func=null, args=[]) {
-        const module = instance._module;
         this._instance = instance;
-        this._module = module;
         this._ops = instance._ops;
         this._memoryOps = instance._memoryOps;
         this._func = func;
