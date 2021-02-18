@@ -1,0 +1,14 @@
+{
+  "name": "terok-nor",
+  "version": "0.1.0",
+  "description": "Asynchronous WebAssembly interpreter",
+  "main": "index.js",
+  "scripts": {
+    "test": "node sample/demo-hello.js && node sample/demo-light.js"
+  },
+  "author": "Brion Vibber <brion@pobox.com>",
+  "license": "MIT",
+  "dependencies": {
+    "binaryen": "99.0.0-nightly.20210217"
+  }
+}
