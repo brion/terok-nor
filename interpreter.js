@@ -164,7 +164,7 @@ class Instance {
                 initial: 1,
                 maximum: 256 // 16 megabytes max
             });
-            const numSegments = mod.getNumMemorySegments;
+            const numSegments = mod.getNumMemorySegments();
             for (let i = 0; i < numSegments; i++) {
                 const segment = mod.getMemorySegmentInfoByIndex(i);
                 if (!segment.passive) {
