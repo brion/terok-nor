@@ -122,11 +122,62 @@ class Instance {
         this.ready = b.ready.then(async () => {
             const mod = this._mod;
 
+            // Memory
+            if (mod.hasMemory()) {
+                const memory = mod.getMemoryInfo();
+                if (memory.module !== '') {
+                    const imported = imports[memory.module][memory.base];
+                    if (imported instanceof Memory) {
+                        this._memory = imported;
+                    } else {
+                        throw new TypeError('Imported memory is not a WebAssembly memory');
+                    }
+                } else {
+                    const memInit = {
+                        initial: memory.initial
+                    };
+                    if (memory.max) {
+                        memInit.maximum = memory.max;
+                    }
+                    if (memory.shared) {
+                        throw new Error('Shared memory not yet supported');
+                    }
+                    this._memory = new Memory(memInit);
+                }
+                const numSegments = mod.getNumMemorySegments();
+                for (let i = 0; i < numSegments; i++) {
+                    const segment = mod.getMemorySegmentInfoByIndex(i);
+                    if (!segment.passive) {
+                        const offset = await evaluateConstant(segment.offset);
+
+                        let heap = new Uint8Array(this.memory.buffer);
+                        const headroom = heap.length - (offset + segment.data.length);
+                        if (headroom < 0) {
+                            this._memory.grow(Math.ceil(headroom / 65536));
+                            heap = new Uint8Array(this._memory.buffer);
+                        }
+
+                        heap.set(offset, segment.data);
+                    }
+                }
+            } else {
+                throw new Error('Currently requires a memory');
+            }
+
+            // Now that we have memory, create the ops module
+            // This implements unary, binary, and load/store ops via sync WebAssembly
+            this._ops = buildOpsModule(this._memory);
+
+            const evaluateConstant = async (expr) => {
+                const frame = new Frame(this);
+                const executor = frame.compile(expr);
+                return frame.evaluate(executor);
+            };
+
             // Globals
             for (let i = 0; i < mod.getNumGlobals(); i++) {
                 const info = b.getGlobalInfo(mod.getGlobalByIndex(i));
-                const frame = new Frame(this);
-                const init = await frame.evaluate(info.init);
+                const init = await evaluateConstant(info.init);
                 const global = new Global({
                     value: typeCode(info.type),
                     mutable: info.mutable
@@ -181,8 +232,7 @@ class Instance {
 
                 const funcTable = mod.getFunctionTable();
                 for (let segment of funcTable.segments) {
-                    const frame = new Frame(this);
-                    let offset = await frame.evaluate(segment.offset);
+                    let offset = await evaluateConstant(segment.offset);
                     const end = offset + segment.names.length;
                     if (this._table.length < end) {
                         this._table.grow(end - this._table.length);
@@ -192,53 +242,6 @@ class Instance {
                     }
                 }
             }
-
-            // Memory
-            if (mod.hasMemory()) {
-                const memory = mod.getMemoryInfo();
-                if (memory.module !== '') {
-                    const imported = imports[memory.module][memory.base];
-                    if (imported instanceof Memory) {
-                        this._memory = imported;
-                    } else {
-                        throw new TypeError('Imported memory is not a WebAssembly memory');
-                    }
-                } else {
-                    const memInit = {
-                        initial: memory.initial
-                    };
-                    if (memory.max) {
-                        memInit.maximum = memory.max;
-                    }
-                    if (memory.shared) {
-                        throw new Error('Shared memory not yet supported');
-                    }
-                    this._memory = new Memory(memInit);
-                }
-                const numSegments = mod.getNumMemorySegments();
-                for (let i = 0; i < numSegments; i++) {
-                    const segment = mod.getMemorySegmentInfoByIndex(i);
-                    if (!segment.passive) {
-                        const frame = new Frame(this);
-                        const offset = await frame.evaluate(segment.offset);
-
-                        let heap = new Uint8Array(this.memory.buffer);
-                        const headroom = heap.length - (offset + segment.data.length);
-                        if (headroom < 0) {
-                            this._memory.grow(Math.ceil(headroom / 65536));
-                            heap = new Uint8Array(this._memory.buffer);
-                        }
-
-                        heap.set(offset, segment.data);
-                    }
-                }
-            } else {
-                throw new Error('Currently requires a memory');
-            }
-
-            // Now that we have memory, create the ops module
-            // This implements unary, binary, and load/store ops via sync WebAssembly
-            this._ops = buildOpsModule(this._memory);
 
             // Set up the exports...
             for (let i = 0; i < mod.getNumExports(); i++) {
@@ -404,7 +407,7 @@ function expressionMap(id) {
         expressions = {};
         for (let name of ids) {
             const val = binaryen[name + 'Id'];
-            expressions[val] = '_execute' + name;
+            expressions[val] = '_compile' + name;
         }
     }
     return expressions[id];
@@ -536,217 +539,304 @@ class Frame {
     /// Run a function to completion.
     /// Not applicable when used for constant evaluation.
     async run() {
+        // @todo cache the compiled executor tree
+        const executor = this.compile(this._func.body);
         await this.stack.block(ReturnLabel, this._func.params.length, async () => {
-            await this.execute(this._func.body);
+            await executor();
         });
         return this.stack.rollup();
     }
 
-    /// Execute a single expression from the AST, leaving any results on the stack.
-    async execute(expression) {
-        if (expression === undefined) {
+    /// Compile a single expression from the AST into an async function
+    compile(expression) {
+        if (!expression) {
             throw new Error('where am i');
         }
         const expr = b.getExpressionInfo(expression);
         const handler = expressionMap(expr.id);
         if (this[handler]) {
-            await this[handler](expr);
+            return this[handler](expr);
         } else {
-            throw new RangeError("Cannot evaluate unknown expression");
+            throw new RangeError("Cannot compile unknown expression");
         }
     }
 
-    /// Evaluate a single expression from the AST and return its result off the stack.
-    async evaluate(expression) {
-        await this.execute(expression);
+    compileMultiple(expressions) {
+        return expressions.map((expression) => this.compile(expression));
+    }
+
+    /// Evaluate a single expression and return its result off the stack.
+    async evaluate(executor) {
+        await executor();
         const value = this.stack.pop();
         return value;
     }
 
     /// Evaluate multiple expressions from the AST and return their results as an array.
     /// @fixme is this necessary? is there a better way to do this that's async-friendly?
-    async evaluateMultiple(expressions) {
+    async evaluateMultiple(executors) {
         const vals = [];
-        for (let expression of expressions) {
-            vals.push(await this.evaluate(expression));
+        for (let executor of executors) {
+            vals.push(await this.evaluate(executor));
         }
         return vals;
     }
 
-    async _executeBlock(expr) {
+    _compileBlock(expr) {
+        const name = expr.name;
         const results = resultCount(expr.type);
-        await this.stack.block(expr.name, results, async () => {
-            for (let child of expr.children) {
-                await this.execute(child);
-            }
-        });
+        const children = this.compileMultiple(expr.children);
+        return async () => {
+            await this.stack.block(name, results, async () => {
+                for (let child of children) {
+                    await child();
+                }
+            });
+        };
     }
 
-    async _executeIf(expr) {
-        const cond = await this.evaluate(expr.condition);
-        if (cond) {
-            await this.execute(expr.ifTrue);
-        } else if (expr.ifFalse) {
-            await this.execute(expr.ifFalse);
+    _compileIf(expr) {
+        const cond = this.compile(expr.condition);
+        const ifTrue = this.compile(expr.ifTrue);
+        const ifFalse = expr.ifFalse ? this.compile(expr.ifFalse) : null;
+        return async() => {
+            if (await this.evaluate(cond)) {
+                await ifTrue();
+            } else if (ifFalse) {
+                await ifFalse();
+            }
         }
     }
 
-    async _executeLoop(expr) {
+    _compileLoop(expr) {
+        const name = expr.name;
         const results = resultCount(expr.type);
-        await this.stack.loop(expr.name, results, async () => {
-            await this.execute(expr.body);
-        });
+        const body = this.compile(expr.body);
+        return async () => {
+            await this.stack.loop(name, results, async () => {
+                await body();
+            });
+        };
     }
 
-    async _executeBreak(expr) {
+    _compileBreak(expr) {
+        const name = expr.name;
         if (expr.conditional) {
-            const cond = await this.evaluate(expr.conditional);
-            if (!cond) {
-                return;
+            const cond = this.compile(expr.conditional);
+            return async () => {
+                if (await this.evaluate(cond)) {
+                    this.stack.escape(name);
+                }
+            };
+        }
+        return async () => {
+            this.stack.escape(name);
+        };
+    }
+
+    _compileSwitch(expr) {
+        const conditional = this.compile(expr.conditional);
+        const names = expr.names;
+        const defaultName = expr.defaultName;
+        return async () => {
+            const index = await this.evaluate(conditional);
+            if (names[index]) {
+                this.stack.escape(names[index]);
+            } else {
+                this.stack.escape(defaultName);
             }
-        }
-        this.stack.escape(expr.name);
+        };
     }
 
-    async _executeSwitch(expr) {
-        const index = await this.evaluate(expr.conditional);
-        let label;
-        if (expr.names[index]) {
-            label = expr.names[index];
-        } else {
-            label = expr.defaultName;
-        }
-        this.stack.escape(label);
-    }
-
-    async _executeCall(expr) {
-        const args = await this.evaluateMultiple(expr.operands);
+    _compileCall(expr) {
+        const operands = this.compileMultiple(expr.operands);
         const func = this._instance._funcs[expr.target];
+        const hasResult = (expr.type !== b.none);
 
-        // @todo store frames on a module-global stack?
-        const result = await func(...args);
+        return async () => {
+            // @todo store frames on a module-global stack?
+            const args = await this.evaluateMultiple(operands);
+            const result = await func(...args);
 
-        // @todo may need to support multiple returns later
-        if (expr.type !== b.none) {
-            this.stack.push(result);
-        }
+            // @todo may need to support multiple returns later
+            if (hasResult) {
+                this.stack.push(result);
+            }
+        };
     }
 
-    async _executeCallIndirect(expr) {
-        const args = await this.evaluateMultiple(expr.operands);
-        const target = await this.evaluate(expr.target);
-        const func = this._instance._table.get(target);
+    _compileCallIndirect(expr) {
+        const operands = this.compileMultiple(expr.operands);
+        const target = this.compile(expr.target);
+        const hasResult = (expr.type !== b.none);
 
-        // @todo enforce signature matches
+        return async () => {
+            const index = await this.evaluate(target);
+            const func = this._instance._table.get(index);
 
-        // @todo store frames on a module-global stack?
-        const result = await func(...args);
-
-        // @todo may need to support multiple returns later
-        if (expr.type !== b.none) {
-            this.stack.push(result);
-        }
+            // @todo enforce signature matches
+    
+            // @todo store frames on a module-global stack?
+            const args = await this.evaluateMultiple(operands);
+            const result = await func(...args);
+    
+            // @todo may need to support multiple returns later
+            if (hasResult) {
+                this.stack.push(result);
+            }
+        };
     }
 
-    async _executeLocalGet(expr) {
-        const value = this.locals[expr.index];
-        this.stack.push(value);
-    }
-
-    async _executeLocalSet(expr) {
-        const value = await this.evaluate(expr.value);
-        this.locals[expr.index] = value;
-        if (expr.isTee) {
+    _compileLocalGet(expr) {
+        const index = expr.index;
+        return async () => {
+            const value = this.locals[index];
             this.stack.push(value);
-        }
+        };
     }
 
-    async _executeGlobalGet(expr) {
+    _compileLocalSet(expr) {
+        const valueExpr = this.compile(expr.value);
+        const isTee = expr.isTee;
+        return async () => {
+            const value = await this.evaluate(valueExpr);
+            this.locals[index] = value;
+            if (isTee) {
+                this.stack.push(value);
+            }
+        };
+    }
+
+    _compileGlobalGet(expr) {
         const global = this._instance._globals[expr.name];
-        const value = global.value;
-        this.stack.push(value);
+        return async () => {
+            const value = global.value;
+            this.stack.push(value);
+        };
     }
 
-    async _executeGlobalSet(expr) {
+    _compileGlobalSet(expr) {
         const global = this._instance._globals[expr.name];
-        const value = await this.evaluate(expr.value);
-        global.value = value;
+        const valueExpr = this.compile(expr.value);
+        return async () => {
+            const value = await this.evaluate(valueExpr);
+            global.value = value;
+        };
     }
 
-    async _executeLoad(expr) {
-        const ptr = await this.evaluate(expr.ptr);
+    _compileLoad(expr) {
+        const ptrExpr = this.compile(expr.ptr);
         const offset = expr.offset;
         const func = this._ops.memory.load[expr.type][expr.bytes << 3][expr.isSigned ? 'signed' : 'unsigned'];
-        const value = func(ptr + offset);
-        this.stack.push(value);
+        return async () => {
+            const ptr = await this.evaluate(ptrExpr);
+            const value = func(ptr + offset);
+            this.stack.push(value);
+        };
     }
 
-    async _executeStore(expr) {
-        const ptr = await this.evaluate(expr.ptr);
+    _compileStore(expr) {
+        const ptrExpr = this.compile(expr.ptr);
         const offset = expr.offset;
-        const value = await this.evaluate(expr.value);
+        const valueExpr = this.compile(expr.value);
         const valueInfo = b.getExpressionInfo(expr.value);
         const func = this._ops.memory.store[valueInfo.type][expr.bytes << 3];
-        func(ptr + offset, value);
+        return async () => {
+            const ptr = await this.evaluate(ptrExpr);
+            const value = await this.evaluate(valueExpr);
+            func(ptr + offset, value);
+        };
     }
 
-    async _executeConst(expr) {
+    _compileConst(expr) {
+        let value;
         if (expr.type == b.i64) {
             const {high, low} = expr.value;
-            this.stack.push((BigInt(high | 0) << 32n) | BigInt(low >>> 0));
+            value = (BigInt(high | 0) << 32n) | BigInt(low >>> 0);
         } else {
-            this.stack.push(expr.value);
+            value = expr.value;
         }
+        return async() => {
+            this.stack.push(value);
+        };
     }
 
-    async _executeUnary(expr) {
-        const value = await this.evaluate(expr.value);
+    _compileUnary(expr) {
+        const valueExpr = this.compile(expr.value);
         const func = this._ops.unary[expr.id];
-        const result = func(value);
-        this.stack.push(result);
+        return async () => {
+            const value = await this.evaluate(valueExpr);
+            const result = func(value);
+            this.stack.push(result);
+        };
     }
 
-    async _executeBinary(expr) {
-        const left = await this.evaluate(expr.left);
-        const right = await this.evaluate(expr.right);
+    _compileBinary(expr) {
+        const leftExpr = this.compile(expr.left);
+        const rightExpr = this.compile(expr.right);
         const func = this._ops.binary[expr.id];
-        const result = func(left, right);
-        this.stack.push(result);
+        return async () => {
+            const left = await this.evaluate(leftExpr);
+            const right = await this.evaluate(rightExpr);
+            const result = func(left, right);
+            this.stack.push(result);
+        };
     }
 
-    async _executeSelect(expr) {
-        const ifTrue = await this.evaluate(expr.ifTrue);
-        const ifFalse = await this.evaluate(expr.ifFalse);
-        const cond = await this.evaluate(expr.condition);
-        this.stack.push(cond ? ifTrue : ifFalse);
+    _compileSelect(expr) {
+        const ifTrueExpr = this.compile(expr.ifTrue);
+        const ifFalseExpr = this.compile(expr.ifFalse);
+        const condExpr = this.compile(expr.condition);
+        return async () => {
+            const ifTrue = await this.evaluate(ifTrueExpr);
+            const ifFalse = await this.evaluate(ifFalseExpr);
+            const cond = await this.evaluate(condExpr);
+            this.stack.push(cond ? ifTrue : ifFalse);
+        };
     }
 
-    async _executeDrop(expr) {
-        await this.evaluate(expr.value);
+    _compileDrop(expr) {
+        const valueExpr = this.compile(expr.value);
+        return async () => {
+            await this.evaluate(valueExpr);
+        };
     }
 
-    async _executeMemorySize(expr) {
-        this.stack.push(this._instance._memory.buffer.length / 65536);
+    _compileMemorySize(expr) {
+        return async () => {
+            this.stack.push(this._instance._memory.buffer.length / 65536);
+        };
     }
 
-    async _executeMemoryGrow(expr) {
-        const pages = await this.evaluate(info.operands[0]);
-        this.stack.push(this._instance._memory.grow(pages));
+    _compileMemoryGrow(expr) {
+        const deltaExpr = this.compile(expr.delta);
+        return async () => {
+            const delta = await this.evaluate(deltaExpr);
+            const result = this._instance._memory.grow(delta);
+            this.stack.push(result);
+        };
     }
 
-    async _executeReturn(expr) {
-        if (expr.value) {
-            await this.execute(expr.value);
-        }
-        this.stack.escape(ReturnLabel);
+    _compileReturn(expr) {
+        const valueExpr = expr.value ? this.compile(expr.value) : null;
+        return async () => {
+            if (valueExpr) {
+                await valueExpr();
+            }
+            this.stack.escape(ReturnLabel);
+        };
     }
 
-    async _executeNop(expr) {
-        // do nothing
+    _compileNop(expr) {
+        return async () => {
+            // do nothing
+        };
     }
 
-    async _executeUnreachable(expr) {
-        throw new WebAssembly.RuntimeError("Unreachable code");
+    _compileUnreachable(expr) {
+        return async () => {
+            throw new WebAssembly.RuntimeError("Unreachable code");
+        };
     }
 }
 
