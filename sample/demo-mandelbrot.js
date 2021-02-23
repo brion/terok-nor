@@ -16,13 +16,13 @@ const imports = {
         var cols = 72, rows = 24;
         var maxIters = 1000;
 
+        const start = Date.now();
         for (var row = 0; row < rows; row++) {
             var y = (row / rows) * (y1 - y0) + y0;
             var str = '';
             for (var col = 0; col < cols; col++) {
                 var x = (col / cols) * (x1 - x0) + x0;
                 var iters = await instance.exports.iterate_mandelbrot(x, y, maxIters);
-                //console.log(iters);
                 if (iters == 0) {
                     str += '.';
                 } else if (iters == 1) {
@@ -37,6 +37,8 @@ const imports = {
             }
             console.log(str);
         }
+        const delta = Date.now() - start;
+        console.log(delta + ' ms');
     }
 
     console.log('Native sync execution:');
