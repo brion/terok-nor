@@ -168,9 +168,8 @@ class Instance {
             this._ops = buildOpsModule(this._memory);
 
             const evaluateConstant = async (expr) => {
-                const frame = new Frame(this);
-                const executor = frame.compile(expr);
-                return frame.evaluate(executor);
+                const func = Compiler.compileExpression(this, expr);
+                return await func();
             };
 
             // Globals
@@ -190,10 +189,7 @@ class Instance {
                 let thunk;
                 if (func.module === '') {
                     // Regular, non-imported function
-                    thunk = async (...args) => {
-                        const frame = new Frame(this, func, args);
-                        return await frame.run();
-                    };
+                    thunk = Compiler.compileFunction(this, func);
                 } else {
                     // Imports; note import functions may be sync or async.
                     const imported = imports[func.module][func.base];
@@ -414,54 +410,59 @@ function expressionMap(id) {
 
 
 class LabelEscape extends Error {
-    constructor(stack, name) {
+    constructor(frame, name) {
         super("WebAssembly interpreter escape", "n/a", "n/a");
-        this.stack = stack;
+        this.frame = frame;
         this.name = name;
     }
 }
 
-const ReturnLabel = Symbol("ReturnLabel");
+const ReturnLabel = Symbol('ReturnLabel');
 
-class Stack {
-    constructor() {
-        this.values = [];
-    }
 
-    get length() {
-        return this.values.length;
+/// Execution state frame for a single function
+///
+/// Will run asynchronously, but is *not* safe for re-entrant calls
+/// during a single execution run.
+///
+/// Not meant to be exposed externally.
+class Frame {
+    constructor(instance, locals=[]) {
+        this.instance = instance;
+        this.locals = locals;
+        this.stack = [];
     }
 
     push(value) {
         if (value === undefined) {
-            throw new Error('undefined noooo');
+            throw new Error('undefined value for push');
         }
-        this.values.push(value);
+        this.stack.push(value);
     }
 
     pop() {
-        if (this.values.length) {
-            return this.values.pop();
-        } else {
+        const result = this.stack.pop();
+        if (result === undefined) {
             throw new RangeError('stack underflow');
         }
+        return result;
     }
 
-    save() {
-        return this.values.length;
+    saveStack() {
+        return this.stack.length;
     }
 
-    restore(saved, preserve=0) {
-        this.values.splice(saved, (this.save() - saved) - preserve);        
+    restoreStack(saved, preserve=0) {
+        this.stack.splice(saved, (this.stack.length - saved) - preserve);        
     }
 
     async block(name, resultCount, callback) {
-        const saved = this.save();
+        const saved = this.saveStack();
         try {
             await callback();
         } catch (e) {
-            if (e instanceof LabelEscape && e.stack === this && e.name === name) {
-                this.restore(saved, resultCount);
+            if (e instanceof LabelEscape && e.frame === this && e.name === name) {
+                this.restoreStack(saved, resultCount);
             } else {
                 throw e;
             }
@@ -469,16 +470,16 @@ class Stack {
     }
 
     async loop(name, resultCount, callback) {
-        const saved = this.save();
+        const savedStack = this.saveStack();
         while (true) {
             try {
                 await callback();
                 // This will return after one iteration unless something branches back to us.
                 return;
             } catch (e) {
-                if (e instanceof LabelEscape && e.stack === this && e.name === name) {
+                if (e instanceof LabelEscape && e.frame === this && e.name === name) {
                     // @fixme unsure of the resultCount behavior here
-                    this.restore(saved, resultCount);
+                    this.restoreStack(savedStack, resultCount);
                     // Don't return from the loop -- let it go round for another pass.
                 } else {
                     throw e;
@@ -491,61 +492,72 @@ class Stack {
         throw new LabelEscape(this, name);
     }
 
-    rollup() {
-        const len = this.length;
-        if (len == 0) {
-            return;
-        } else if (len == 1) {
-            return this.pop();
-        } else {
-            const values = new Array(len);
-            for (let i = len - 1; i >= 0; i--) {
-                values[i] = this.pop();
-            }
-            return values;
+    /// Evaluate a single expression and return its result off the stack.
+    async evaluate(executor) {
+        await executor(this);
+        const value = this.pop();
+        return value;
+    }
+
+    /// Evaluate multiple expressions from the AST and return their results as an array.
+    /// @fixme is this necessary? is there a better way to do this that's async-friendly?
+    async evaluateMultiple(executors) {
+        for (let executor of executors) {
+            await executor(this);
         }
+        const len = executors.length;
+        const vals = new Array(len);
+        for (let i = len - 1; i >= 0; i--) {
+            vals[i] = this.pop();
+        }
+        return vals;
     }
 }
 
-/// Execution state frame for a single function
-///
-/// Will run asynchronously, but is *not* safe for re-entrant calls
-/// during a single execution run.
-///
-/// Not meant to be exposed externally.
-class Frame {
-    constructor(instance, func=null, args=[]) {
-        this._instance = instance;
-        this._ops = instance._ops;
-        this._func = func;
-
-        if (func) {
-            // Reserve space for arguments and locals
-            const params = b.expandType(func.params).map(b.expandType);
-            this._params = params;
-
-            this.locals = params.concat(func.vars).map(defaultValue);
-            for (let i = 0; i < params.length; i++) {
-                this.locals[i] = coerceValue(params[i], args[i]);
-            }
-        } else {
-            // Constant evaluation, no function state
-            this._params = [];
-            this.locals = [];
-        }
-
-        this.stack = new Stack();
+class Compiler {
+    constructor(instance, params=[], vars=[]) {
+        this.instance = instance;
+        this.paramTypes = params.slice();
+        this.localDefaults = params.concat(vars).map(defaultValue);
     }
 
-    /// Run a function to completion.
-    /// Not applicable when used for constant evaluation.
-    async run() {
-        // @todo cache the compiled executor tree
-        const executor = this.compile(this._func.body);
-        await this.stack.block(ReturnLabel, this._func.params.length, async () => {
-            await executor();
-        });
-        return this.stack.rollup();
+    static compileFunction(instance, func) {
+        const hasResult = (func.results !== b.none);
+        const resultCount = hasResult ? 1 : 0;
+        const compiler = new Compiler(instance, b.expandType(func.params), func.vars);
+        const executor = compiler.compile(func.body);
+        return async (...args) => {
+            const locals = compiler.initializeLocals(args);
+            const frame = new Frame(instance, locals);
+            await frame.block(ReturnLabel, resultCount, async () => {
+                await executor(frame);
+            });
+            if (hasResult) {
+                return frame.pop();
+            } else {
+                return;
+            }
+        }
+    }
+
+    static compileExpression(instance, expr) {
+        const compiler = new Compiler(instance);
+        const executor = compiler.compile(expr);
+        return async () => {
+            const frame = new Frame(instance);
+            await executor(frame);
+            return frame.pop();
+        };
+    }
+
+    initializeLocals(args) {
+        const paramTypes = this.paramTypes;
+        const locals = this.localDefaults.slice();
+        const len = Math.min(paramTypes.length, args.length);
+        for (let i = 0; i < len; i++) {
+            locals[i] = coerceValue(paramTypes[i], args[i]);
+        }
+        return locals;
     }
 
     /// Compile a single expression from the AST into an async function
@@ -567,35 +579,14 @@ class Frame {
         return expressions.map((expression) => this.compile(expression));
     }
 
-    /// Evaluate a single expression and return its result off the stack.
-    async evaluate(executor) {
-        await executor();
-        const value = this.stack.pop();
-        return value;
-    }
-
-    /// Evaluate multiple expressions from the AST and return their results as an array.
-    /// @fixme is this necessary? is there a better way to do this that's async-friendly?
-    async evaluateMultiple(executors) {
-        for (let executor of executors) {
-            await executor();
-        }
-        const len = executors.length;
-        const vals = new Array(len);
-        for (let i = len - 1; i >= 0; i--) {
-            vals[i] = this.stack.pop();
-        }
-        return vals;
-    }
-
     _compileBlock(expr) {
         const name = expr.name;
         const results = resultCount(expr.type);
         const children = this.compileMultiple(expr.children);
-        return async () => {
-            await this.stack.block(name, results, async () => {
+        return async (frame) => {
+            await frame.block(name, results, async () => {
                 for (let child of children) {
-                    await child();
+                    await child(frame);
                 }
             });
         };
@@ -605,12 +596,12 @@ class Frame {
         const cond = this.compile(expr.condition);
         const ifTrue = this.compile(expr.ifTrue);
         const ifFalse = expr.ifFalse ? this.compile(expr.ifFalse) : null;
-        return async () => {
-            await cond();
-            if (this.stack.pop()) {
-                await ifTrue();
+        return async (frame) => {
+            await cond(frame);
+            if (frame.pop()) {
+                await ifTrue(frame);
             } else if (ifFalse) {
-                await ifFalse();
+                await ifFalse(frame);
             }
         }
     }
@@ -619,9 +610,9 @@ class Frame {
         const name = expr.name;
         const results = resultCount(expr.type);
         const body = this.compile(expr.body);
-        return async () => {
-            await this.stack.loop(name, results, async () => {
-                await body();
+        return async (frame) => {
+            await frame.loop(name, results, async () => {
+                await body(frame);
             });
         };
     }
@@ -630,15 +621,15 @@ class Frame {
         const name = expr.name;
         if (expr.condition) {
             const conditionExpr = this.compile(expr.condition);
-            return async () => {
-                await conditionExpr();
-                if (this.stack.pop()) {
-                    this.stack.escape(name);
+            return async (frame) => {
+                await conditionExpr(frame);
+                if (frame.pop()) {
+                    frame.escape(name);
                 }
             };
         }
-        return async () => {
-            this.stack.escape(name);
+        return async (frame) => {
+            frame.escape(name);
         };
     }
 
@@ -646,30 +637,30 @@ class Frame {
         const conditionExpr = this.compile(expr.condition);
         const names = expr.names;
         const defaultName = expr.defaultName;
-        return async () => {
-            await conditionExpr();
-            const index = this.stack.pop();
+        return async (frame) => {
+            await conditionExpr(frame);
+            const index = frame.pop();
             if (names[index]) {
-                this.stack.escape(names[index]);
+                frame.escape(names[index]);
             } else {
-                this.stack.escape(defaultName);
+                frame.escape(defaultName);
             }
         };
     }
 
     _compileCall(expr) {
         const operands = this.compileMultiple(expr.operands);
-        const func = this._instance._funcs[expr.target];
+        const func = this.instance._funcs[expr.target];
         const hasResult = (expr.type !== b.none);
 
-        return async () => {
+        return async (frame) => {
             // @todo store frames on a module-global stack?
-            const args = await this.evaluateMultiple(operands);
+            const args = await frame.evaluateMultiple(operands);
             const result = await func(...args);
 
             // @todo may need to support multiple returns later
             if (hasResult) {
-                this.stack.push(result);
+                frame.push(result);
             }
         };
     }
@@ -678,30 +669,31 @@ class Frame {
         const operands = this.compileMultiple(expr.operands);
         const targetExpr = this.compile(expr.target);
         const hasResult = (expr.type !== b.none);
+        const table = this.instance._table;
 
-        return async () => {
-            await targetExpr();
-            const index = this.stack.pop();
-            const func = this._instance._table.get(index);
+        return async (frame) => {
+            await targetExpr(frame);
+            const index = this.pop();
+            const func = table.get(index);
 
             // @todo enforce signature matches
     
             // @todo store frames on a module-global stack?
-            const args = await this.evaluateMultiple(operands);
+            const args = await frame.evaluateMultiple(operands);
             const result = await func(...args);
     
             // @todo may need to support multiple returns later
             if (hasResult) {
-                this.stack.push(result);
+                frame.push(result);
             }
         };
     }
 
     _compileLocalGet(expr) {
         const index = expr.index;
-        return async () => {
-            const value = this.locals[index];
-            this.stack.push(value);
+        return async (frame) => {
+            const value = frame.locals[index];
+            frame.push(value);
         };
     }
 
@@ -709,30 +701,30 @@ class Frame {
         const index = expr.index;
         const valueExpr = this.compile(expr.value);
         const isTee = expr.isTee;
-        return async () => {
-            await valueExpr();
-            const value = this.stack.pop();
-            this.locals[index] = value;
+        return async (frame) => {
+            await valueExpr(frame);
+            const value = frame.pop();
+            frame.locals[index] = value;
             if (isTee) {
-                this.stack.push(value);
+                frame.push(value);
             }
         };
     }
 
     _compileGlobalGet(expr) {
-        const global = this._instance._globals[expr.name];
-        return async () => {
+        const global = this.instance._globals[expr.name];
+        return async (frame) => {
             const value = global.value;
-            this.stack.push(value);
+            frame.push(value);
         };
     }
 
     _compileGlobalSet(expr) {
-        const global = this._instance._globals[expr.name];
+        const global = this.instance._globals[expr.name];
         const valueExpr = this.compile(expr.value);
-        return async () => {
-            await valueExpr();
-            const value = this.stack.pop();
+        return async (frame) => {
+            await valueExpr(frame);
+            const value = frame.pop();
             global.value = value;
         };
     }
@@ -740,12 +732,12 @@ class Frame {
     _compileLoad(expr) {
         const ptrExpr = this.compile(expr.ptr);
         const offset = expr.offset;
-        const func = this._ops.memory.load[expr.type][expr.bytes << 3][expr.isSigned ? 'signed' : 'unsigned'];
-        return async () => {
-            await ptrExpr();
-            const ptr = this.stack.pop();
+        const func = this.instance._ops.memory.load[expr.type][expr.bytes << 3][expr.isSigned ? 'signed' : 'unsigned'];
+        return async (frame) => {
+            await ptrExpr(frame);
+            const ptr = frame.pop();
             const value = func(ptr + offset);
-            this.stack.push(value);
+            frame.push(value);
         };
     }
 
@@ -754,12 +746,12 @@ class Frame {
         const offset = expr.offset;
         const valueExpr = this.compile(expr.value);
         const valueInfo = b.getExpressionInfo(expr.value);
-        const func = this._ops.memory.store[valueInfo.type][expr.bytes << 3];
-        return async () => {
-            await ptrExpr();
-            await valueExpr();
-            const value = this.stack.pop();
-            const ptr = this.stack.pop();
+        const func = this.instance._ops.memory.store[valueInfo.type][expr.bytes << 3];
+        return async (frame) => {
+            await ptrExpr(frame);
+            await valueExpr(frame);
+            const value = frame.pop();
+            const ptr = frame.pop();
             func(ptr + offset, value);
         };
     }
@@ -772,33 +764,33 @@ class Frame {
         } else {
             value = expr.value;
         }
-        return async() => {
-            this.stack.push(value);
+        return async (frame) => {
+            frame.push(value);
         };
     }
 
     _compileUnary(expr) {
         const valueExpr = this.compile(expr.value);
-        const func = this._ops.unary[expr.op];
-        return async () => {
-            await valueExpr();
-            const value = this.stack.pop();
+        const func = this.instance._ops.unary[expr.op];
+        return async (frame) => {
+            await valueExpr(frame);
+            const value = frame.pop();
             const result = func(value);
-            this.stack.push(result);
+            frame.push(result);
         };
     }
 
     _compileBinary(expr) {
         const leftExpr = this.compile(expr.left);
         const rightExpr = this.compile(expr.right);
-        const func = this._ops.binary[expr.op];
-        return async () => {
-            await leftExpr();
-            await rightExpr();
-            const right = this.stack.pop();
-            const left = this.stack.pop();
+        const func = this.instance._ops.binary[expr.op];
+        return async (frame) => {
+            await leftExpr(frame);
+            await rightExpr(frame);
+            const right = frame.pop();
+            const left = frame.pop();
             const result = func(left, right);
-            this.stack.push(result);
+            frame.push(result);
         };
     }
 
@@ -806,61 +798,61 @@ class Frame {
         const ifTrueExpr = this.compile(expr.ifTrue);
         const ifFalseExpr = this.compile(expr.ifFalse);
         const condExpr = this.compile(expr.condition);
-        return async () => {
-            await ifTrueExpr();
-            await ifFalseExpr();
-            await condExpr();
-            const cond = this.stack.pop();
-            const ifFalse = this.stack.pop();
-            const ifTrue = this.stack.pop();
+        return async (frame) => {
+            await ifTrueExpr(frame);
+            await ifFalseExpr(frame);
+            await condExpr(frame);
+            const cond = frame.pop();
+            const ifFalse = frame.pop();
+            const ifTrue = frame.pop();
             const result = cond ? ifTrue : ifFalse;
-            this.stack.push(result);
+            frame.push(result);
         };
     }
 
     _compileDrop(expr) {
         const valueExpr = this.compile(expr.value);
-        return async () => {
-            await valueExpr();
-            this.stack.pop();
+        return async (frame) => {
+            await valueExpr(frame);
+            frame.pop();
         };
     }
 
     _compileMemorySize(expr) {
-        return async () => {
-            const pages = this._instance._memory.buffer.length / 65536;
-            this.stack.push(pages);
+        return async (frame) => {
+            const pages = this.instance._memory.buffer.length / 65536;
+            frame.push(pages);
         };
     }
 
     _compileMemoryGrow(expr) {
         const deltaExpr = this.compile(expr.delta);
-        return async () => {
+        return async (frame) => {
             await deltaExpr();
-            const delta = this.stack.pop();
-            const result = this._instance._memory.grow(delta);
-            this.stack.push(result);
+            const delta = frame.pop();
+            const result = this.instance._memory.grow(delta);
+            frame.push(result);
         };
     }
 
     _compileReturn(expr) {
         const valueExpr = expr.value ? this.compile(expr.value) : null;
-        return async () => {
+        return async (frame) => {
             if (valueExpr) {
-                await valueExpr();
+                await valueExpr(frame);
             }
-            this.stack.escape(ReturnLabel);
+            frame.escape(ReturnLabel);
         };
     }
 
     _compileNop(expr) {
-        return async () => {
+        return async (frame) => {
             // do nothing
         };
     }
 
     _compileUnreachable(expr) {
-        return async () => {
+        return async (frame) => {
             throw new WebAssembly.RuntimeError("Unreachable code");
         };
     }
