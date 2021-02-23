@@ -11,7 +11,6 @@ class Table {
             throw new TypeError('Interpreter only supports anyfunc tables');
         }
         if (initial !== (initial | 0)) {
-            console.log({initial});
             throw new TypeError('invalid initial');
         }
         if (initial < 0 || initial > 2**32 - 1) {
@@ -434,6 +433,9 @@ class Stack {
     }
 
     push(value) {
+        if (value === undefined) {
+            throw new Error('undefined noooo');
+        }
         this.values.push(value);
     }
 
@@ -457,7 +459,6 @@ class Stack {
         const saved = this.save();
         try {
             await callback();
-            return;
         } catch (e) {
             if (e instanceof LabelEscape && e.stack === this && e.name === name) {
                 this.restore(saved, resultCount);
@@ -520,10 +521,10 @@ class Frame {
 
         if (func) {
             // Reserve space for arguments and locals
-            const params = b.expandType(func.params).filter(b.expandType);
+            const params = b.expandType(func.params).map(b.expandType);
             this._params = params;
 
-            this.locals = params.concat(func.vars).filter(defaultValue);
+            this.locals = params.concat(func.vars).map(defaultValue);
             for (let i = 0; i < params.length; i++) {
                 this.locals[i] = coerceValue(params[i], args[i]);
             }
@@ -555,7 +556,8 @@ class Frame {
         const expr = b.getExpressionInfo(expression);
         const handler = expressionMap(expr.id);
         if (this[handler]) {
-            return this[handler](expr);
+            const executor = this[handler](expr);
+            return executor;
         } else {
             throw new RangeError("Cannot compile unknown expression");
         }
@@ -575,12 +577,12 @@ class Frame {
     /// Evaluate multiple expressions from the AST and return their results as an array.
     /// @fixme is this necessary? is there a better way to do this that's async-friendly?
     async evaluateMultiple(executors) {
-        const len = executors.length;
-        const vals = new Array(len);
         for (let executor of executors) {
             await executor();
         }
-        for (let i = vals.length - 1; i >= 0; i--) {
+        const len = executors.length;
+        const vals = new Array(len);
+        for (let i = len - 1; i >= 0; i--) {
             vals[i] = this.stack.pop();
         }
         return vals;
@@ -605,7 +607,7 @@ class Frame {
         const ifFalse = expr.ifFalse ? this.compile(expr.ifFalse) : null;
         return async () => {
             await cond();
-            if (await this.stack.pop()) {
+            if (this.stack.pop()) {
                 await ifTrue();
             } else if (ifFalse) {
                 await ifFalse();
@@ -626,10 +628,10 @@ class Frame {
 
     _compileBreak(expr) {
         const name = expr.name;
-        if (expr.conditional) {
-            const cond = this.compile(expr.conditional);
+        if (expr.condition) {
+            const conditionExpr = this.compile(expr.condition);
             return async () => {
-                await cond();
+                await conditionExpr();
                 if (this.stack.pop()) {
                     this.stack.escape(name);
                 }
@@ -641,11 +643,11 @@ class Frame {
     }
 
     _compileSwitch(expr) {
-        const conditional = this.compile(expr.conditional);
+        const conditionExpr = this.compile(expr.condition);
         const names = expr.names;
         const defaultName = expr.defaultName;
         return async () => {
-            await conditional();
+            await conditionExpr();
             const index = this.stack.pop();
             if (names[index]) {
                 this.stack.escape(names[index]);
@@ -704,6 +706,7 @@ class Frame {
     }
 
     _compileLocalSet(expr) {
+        const index = expr.index;
         const valueExpr = this.compile(expr.value);
         const isTee = expr.isTee;
         return async () => {
@@ -776,7 +779,7 @@ class Frame {
 
     _compileUnary(expr) {
         const valueExpr = this.compile(expr.value);
-        const func = this._ops.unary[expr.id];
+        const func = this._ops.unary[expr.op];
         return async () => {
             await valueExpr();
             const value = this.stack.pop();
@@ -788,7 +791,7 @@ class Frame {
     _compileBinary(expr) {
         const leftExpr = this.compile(expr.left);
         const rightExpr = this.compile(expr.right);
-        const func = this._ops.binary[expr.id];
+        const func = this._ops.binary[expr.op];
         return async () => {
             await leftExpr();
             await rightExpr();
@@ -931,14 +934,22 @@ function buildOpsModule(memory) {
     const binaryOps = [
         [b.AddInt32, m.i32.add, b.i32, b.i32],
         [b.AddInt64, m.i64.add, b.i64, b.i64],
+        [b.AddFloat32, m.f32.add, b.f32, b.f32],
+        [b.AddFloat64, m.f64.add, b.f64, b.f64],
         [b.SubInt32, m.i32.sub, b.i32, b.i32],
         [b.SubInt64, m.i64.sub, b.i64, b.i64],
+        [b.SubFloat32, m.f32.sub, b.f32, b.f32],
+        [b.SubFloat64, m.f64.sub, b.f64, b.f64],
         [b.MulInt32, m.i32.mul, b.i32, b.i32],
         [b.MulInt64, m.i64.mul, b.i64, b.i64],
+        [b.MulFloat32, m.f32.mul, b.f32, b.f32],
+        [b.MulFloat64, m.f64.mul, b.f64, b.f64],
         [b.DivSInt32, m.i32.div_s, b.i32, b.i32],
         [b.DivSInt64, m.i64.div_s, b.i64, b.i64],
         [b.DivUInt32, m.i32.div_u, b.i32, b.i32],
         [b.DivUInt64, m.i64.div_u, b.i64, b.i64],
+        [b.DivFloat32, m.f32.div, b.f32, b.f32],
+        [b.DivFloat64, m.f64.div, b.f64, b.f64],
         [b.RemSInt32, m.i32.rem_s, b.i32, b.i32],
         [b.RemSInt64, m.i64.rem_s, b.i64, b.i64],
         [b.RemUInt32, m.i32.rem_u, b.i32, b.i32],
@@ -1060,10 +1071,11 @@ function buildOpsModule(memory) {
         return Math.max.apply(null, list.map(([op]) => op));
     }
     function opArray(prefix, list) {
-        let ops = new Array(maxOp(unaryOps));
+        const ops = new Array(maxOp(unaryOps));
         for (let [op] of list) {
             ops[op] = instance.exports[prefix + op];
         }
+        return ops;
     }
     return {
         unary: opArray('unary', unaryOps),

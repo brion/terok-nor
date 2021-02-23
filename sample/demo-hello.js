@@ -7,6 +7,7 @@ const imports = {
     env: {
         my_putc: function(_fd, c) {
             console.log(String.fromCharCode(c));
+            return c;
         }
     }
 };

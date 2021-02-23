@@ -4,7 +4,7 @@
   "description": "Asynchronous WebAssembly interpreter",
   "main": "index.js",
   "scripts": {
-    "test": "node sample/demo-hello.js && node sample/demo-light.js"
+    "test": "node sample/demo-hello.js && node sample/demo-light.js && node sample/demo-mandelbrot.js"
   },
   "author": "Brion Vibber <brion@pobox.com>",
   "license": "MIT",
