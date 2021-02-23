@@ -9,14 +9,33 @@ class Table {
         if (element !== 'anyfunc') {
             throw new TypeError('Interpreter only supports anyfunc tables');
         }
-        if (maximum !== undefined && maximum < initial) {
-            throw new RangeError('maximum smaller than initial');
+        if (initial !== (initial | 0)) {
+            console.log({initial});
+            throw new TypeError('invalid initial');
         }
-        this._element = element;
+        if (initial < 0 || initial > 2**32 - 1) {
+            throw new RangeError('initial out of range');
+        }
+
+        const hasMaximum = (maximum !== undefined);
+        if (hasMaximum) {
+            if (maximum !== (maximum | 0)) {
+                throw new TypeError('maximum must be number')
+            }
+            if (maximum < 0 || maximum > 2**32 - 1) {
+                throw new RangeError('maximum out of range');
+            }
+            if (maximum < initial) {
+                throw new RangeError('maximum smaller than initial');
+            }
+        }
+
         this._maximum = maximum;
-        this._values = [];
+        this._hasMaximum = hasMaximum;
+
+        this._values = new Array(initial);
         for (let i = 0; i < initial; i++) {
-            this._values.push(null);
+            this._values[i] = null;
         }
 
         Object.defineProperty(this, 'length', {
@@ -26,21 +45,19 @@ class Table {
         });
     }
 
-    _validateRange(index) {
-        if (index < 0 || index >= this.length) {
-            throw new RangeError('index out of range');
-        }
-    }
-
     get(index) {
-        this._validateRange(index);
+        if (index !== (index | 0) || index < 0 || index > this.length) {
+            throw new RangeError('invalid index');
+        }
         return this._values[index];
     }
 
     set(index, value) {
-        this._validateRange(index);
-        if (this.element === 'anyfunc' && !(value instanceof Function)) {
+        if (!(value instanceof Function)) {
             throw new TypeError('not a function');
+        }
+        if (index !== (index | 0) || index < 0 || index > this.length) {
+            throw new RangeError('invalid index');
         }
         this._values[index] = value;
     }
@@ -81,6 +98,7 @@ class Module {
         this.ready = b.ready.then(async () => {
             this._mod = b.readBinary(input);
             this.isReady = true;
+            return this;
         });
     }
 }
@@ -103,6 +121,19 @@ class Instance {
         this.isReady = false;
         this.ready = b.ready.then(async () => {
             const mod = this._mod;
+
+            // Globals
+            for (let i = 0; i < mod.getNumGlobals(); i++) {
+                const info = b.getGlobalInfo(mod.getGlobalByIndex(i));
+                const frame = new Frame(this);
+                const init = await frame.evaluate(info.init);
+                const global = new Global({
+                    value: typeCode(info.type),
+                    mutable: info.mutable
+                });
+                global.value = init;
+                this._globals[info.name] = global;
+            }
 
             // Prep internally-callable functions
             for (let i = 0; i < mod.getNumFunctions(); i++) {
@@ -130,53 +161,81 @@ class Instance {
             }
 
             // Function table
-            const table = mod.getFunctionTable();
-            if (table.imported) {
-                // @todo untested so far
-                this._table = imports[table.module][table.base];
-            } else {
-                // @todo figure out how to get initial and max table size from binaryen
-                // @todo what if no table is present?
-                this._table = new Table({
-                    element: "anyfunc",
-                    initial: 0
-                });
+            const numTables = mod.getNumTables();
+            if (numTables > 1) {
+                throw new RangeError('Multiple tables not yet supported');
             }
-            for (let segment of table.segments) {
-                const frame = new Frame(this);
-                let offset = await frame.evaluate(segment.offset);
-                const end = offset + segment.names.length;
-                if (this._table.length < end) {
-                    this._table.grow(end - this._table.length);
+            if (numTables > 0) {
+                const table = b.getTableInfo(mod.getTableByIndex(0));
+                if (table.module !== '') {
+                    // @todo untested so far
+                    this._table = imports[table.module][table.base];
+                } else {
+                    const init = {
+                        element: 'anyfunc', // @todo how to get the element type? may need to extend again
+                        initial: table.initial
+                    };
+                    if (table.max !== undefined) {
+                        init.maximum = table.max;
+                    }
+                    this._table = new Table(init);
                 }
-                for (let name of segment.names) {
-                    this._table.set(offset++, this._thunks[name]);
+
+                const funcTable = mod.getFunctionTable();
+                for (let segment of funcTable.segments) {
+                    const frame = new Frame(this);
+                    let offset = await frame.evaluate(segment.offset);
+                    const end = offset + segment.names.length;
+                    if (this._table.length < end) {
+                        this._table.grow(end - this._table.length);
+                    }
+                    for (let name of segment.names) {
+                        this._table.set(offset++, this._thunks[name]);
+                    }
                 }
             }
 
             // Memory
-            // @todo support importing memory
-            // @todo get the initial and mix/max sizes
-            this._memory = new Memory({
-                initial: 1,
-                maximum: 256 // 16 megabytes max
-            });
-            const numSegments = mod.getNumMemorySegments();
-            for (let i = 0; i < numSegments; i++) {
-                const segment = mod.getMemorySegmentInfoByIndex(i);
-                if (!segment.passive) {
-                    const frame = new Frame(this);
-                    const offset = await frame.evaluate(segment.offset);
-
-                    let heap = new Uint8Array(this.memory.buffer);
-                    const headroom = heap.length - (offset + segment.data.length);
-                    if (headroom < 0) {
-                        this._memory.grow(Math.ceil(headroom / 65536));
-                        heap = new Uint8Array(this._memory.buffer);
+            if (mod.hasMemory()) {
+                const memory = mod.getMemoryInfo();
+                if (memory.module !== '') {
+                    const imported = imports[memory.module][memory.base];
+                    if (imported instanceof Memory) {
+                        this._memory = imported;
+                    } else {
+                        throw new TypeError('Imported memory is not a WebAssembly memory');
                     }
-
-                    heap.set(offset, segment.data);
+                } else {
+                    const memInit = {
+                        initial: memory.initial
+                    };
+                    if (memory.max) {
+                        memInit.maximum = memory.max;
+                    }
+                    if (memory.shared) {
+                        throw new Error('Shared memory not yet supported');
+                    }
+                    this._memory = new Memory(memInit);
                 }
+                const numSegments = mod.getNumMemorySegments();
+                for (let i = 0; i < numSegments; i++) {
+                    const segment = mod.getMemorySegmentInfoByIndex(i);
+                    if (!segment.passive) {
+                        const frame = new Frame(this);
+                        const offset = await frame.evaluate(segment.offset);
+
+                        let heap = new Uint8Array(this.memory.buffer);
+                        const headroom = heap.length - (offset + segment.data.length);
+                        if (headroom < 0) {
+                            this._memory.grow(Math.ceil(headroom / 65536));
+                            heap = new Uint8Array(this._memory.buffer);
+                        }
+
+                        heap.set(offset, segment.data);
+                    }
+                }
+            } else {
+                throw new Error('Currently requires a memory');
             }
 
             // Now that we have memory, create the ops module
@@ -200,7 +259,7 @@ class Instance {
                         exported = this._memory;
                         break;
                     case b.ExternalGlobal:
-                        exported = await this._lazyInitGlobal(exp.value);
+                        exported = this._globals[exp.value];
                         break;
                     default:
                         throw new RangeError("Unexpected export type");
@@ -209,26 +268,8 @@ class Instance {
             }
 
             this.isReady = true;
+            return this;
         });
-    }
-
-    // Question: can globals be initialized relative to mutable imports?
-    // If so they need to be evaluated at instantiation time, before
-    // things change.
-    async _lazyInitGlobal(name) {
-        if (!this._globals[name]) {
-            const ref = this._mod.getGlobal(name);
-            const info = b.getGlobalInfo(ref);
-            const frame = new Frame(this);
-            const init = await frame.evaluate(info.init);
-            const global = new Global({
-                value: typeCode(info.type),
-                mutable: info.mutable
-            });
-            global.value = init;
-            this._globals[name] = global;
-        }
-        return this._globals[name];
     }
 
 }
@@ -237,7 +278,8 @@ class Instance {
 /// Currently this compilation is done synchronously on the main thread,
 /// but please use this async API for future-proofing.
 async function compile(bufferSource) {
-    return new Module(bufferSource);
+    const module = new Module(bufferSource);
+    return await module.ready;
 }
 
 /// Parse a module from a stream containing binary form and prepare it to be
@@ -247,7 +289,8 @@ async function compile(bufferSource) {
 async function compileStreaming(source) {
     const response = await source;
     const buffer = await response.arrayBuffer();
-    return new Module(buffer);
+    const module = new Module(buffer);
+    return await module.ready;
 }
 
 /// Parse/compile and instantiate from a buffer
@@ -619,13 +662,13 @@ class Frame {
     }
 
     async _executeGlobalGet(expr) {
-        const global = await this._instance._lazyInitGlobal(expr.name);
+        const global = this._instance._globals[expr.name];
         const value = global.value;
         this.stack.push(value);
     }
 
     async _executeGlobalSet(expr) {
-        const global = await this._instance._lazyInitGlobal(expr.name);
+        const global = this._instance._globals[expr.name];
         const value = await this.evaluate(expr.value);
         global.value = value;
     }
@@ -973,6 +1016,7 @@ const Interpreter = {
 
 Interpreter.ready = b.ready.then(() => {
     Interpreter.isReady = true;
+    return Interpreter;
 });
 
 module.exports = Interpreter;
