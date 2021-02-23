@@ -4,6 +4,7 @@ const b = binaryen;
 const Global = WebAssembly.Global;
 const Memory = WebAssembly.Memory;
 
+/// Clone of WebAssembly.Table that lets us store JS async functions
 class Table {
     constructor({element, initial, maximum=undefined}) {
         if (element !== 'anyfunc') {
@@ -130,8 +131,7 @@ class Instance {
                 const global = new Global({
                     value: typeCode(info.type),
                     mutable: info.mutable
-                });
-                global.value = init;
+                }, init);
                 this._globals[info.name] = global;
             }
 
