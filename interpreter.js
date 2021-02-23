@@ -434,9 +434,6 @@ class Frame {
     }
 
     push(value) {
-        if (value === undefined) {
-            throw new Error('undefined value for push');
-        }
         this.stack.push(value);
     }
 
@@ -492,15 +489,14 @@ class Frame {
         throw new LabelEscape(this, name);
     }
 
-    /// Evaluate a single expression and return its result off the stack.
+    /// Evaluate a single expression executor and return its result off the stack.
     async evaluate(executor) {
         await executor(this);
         const value = this.pop();
         return value;
     }
 
-    /// Evaluate multiple expressions from the AST and return their results as an array.
-    /// @fixme is this necessary? is there a better way to do this that's async-friendly?
+    /// Evaluate multiple expression executors and return their results as an array.
     async evaluateMultiple(executors) {
         for (let executor of executors) {
             await executor(this);
@@ -654,7 +650,6 @@ class Compiler {
         const hasResult = (expr.type !== b.none);
 
         return async (frame) => {
-            // @todo store frames on a module-global stack?
             const args = await frame.evaluateMultiple(operands);
             const result = await func(...args);
 
@@ -673,15 +668,14 @@ class Compiler {
 
         return async (frame) => {
             await targetExpr(frame);
-            const index = this.pop();
+            const index = frame.pop();
             const func = table.get(index);
 
             // @todo enforce signature matches
     
-            // @todo store frames on a module-global stack?
             const args = await frame.evaluateMultiple(operands);
             const result = await func(...args);
-    
+
             // @todo may need to support multiple returns later
             if (hasResult) {
                 frame.push(result);
