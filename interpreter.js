@@ -111,7 +111,6 @@ class Instance {
         this._mod = module._mod;
         this._globals = {};
         this._funcs = {};
-        this._thunks = {};
 
         // @todo support multiples
         this._memory = null;
@@ -156,8 +155,7 @@ class Instance {
                         throw new RangeError("Expected function for import");
                     }
                 }
-                this._funcs[func.name] = func;
-                this._thunks[func.name] = thunk;
+                this._funcs[func.name] = thunk;
             }
 
             // Function table
@@ -190,7 +188,7 @@ class Instance {
                         this._table.grow(end - this._table.length);
                     }
                     for (let name of segment.names) {
-                        this._table.set(offset++, this._thunks[name]);
+                        this._table.set(offset++, this._funcs[name]);
                     }
                 }
             }
@@ -250,7 +248,7 @@ class Instance {
                 let exported;
                 switch (exp.kind) {
                     case b.ExternalFunction:
-                        exported = this._thunks[exp.value];
+                        exported = this._funcs[exp.value];
                         break;
                     case b.ExternalTable:
                         exported = this._table;
@@ -623,13 +621,13 @@ class Frame {
 
     async _executeCall(expr) {
         const args = await this.evaluateMultiple(expr.operands);
-        const thunk = this._instance._thunks[expr.target];
+        const func = this._instance._funcs[expr.target];
 
         // @todo store frames on a module-global stack?
-        const result = await thunk(...args);
+        const result = await func(...args);
 
         // @todo may need to support multiple returns later
-        if (expr.type != b.none) {
+        if (expr.type !== b.none) {
             this.stack.push(result);
         }
     }
@@ -637,13 +635,15 @@ class Frame {
     async _executeCallIndirect(expr) {
         const args = await this.evaluateMultiple(expr.operands);
         const target = await this.evaluate(expr.target);
-        const thunk = this._instance._table.get(target);
+        const func = this._instance._table.get(target);
+
+        // @todo enforce signature matches
 
         // @todo store frames on a module-global stack?
-        const result = await thunk(...args);
+        const result = await func(...args);
 
         // @todo may need to support multiple returns later
-        if (expr.type != b.none) {
+        if (expr.type !== b.none) {
             this.stack.push(result);
         }
     }
