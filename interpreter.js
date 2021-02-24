@@ -419,10 +419,10 @@ function expressionMap(id) {
 ///
 /// Not meant to be exposed externally.
 class Frame {
-    constructor(instance, locals=[], stackDepth=0) {
+    constructor(instance) {
         this.instance = instance;
-        this.locals = locals;
-        this.stack = new Array(stackDepth);
+        this.locals = null;
+        this.stack = null;
     }
 }
 
@@ -443,35 +443,33 @@ class Compiler {
         const compiler = new Compiler(instance, params, vars);
         const inst = compiler.enclose(instance);
         const frame = compiler.enclose(Frame);
-        const meta = compiler.enclose({
-            get maxDepth() {
-                return compiler.maxDepth;
-            }
-        });
-        const defaults = compiler.enclose(compiler.localDefaults);
         const paramNames = params.map((_type, index) => `param${index}`);
         const setArgs = paramNames.map((name, index) => {
-            return `locals[${index}] = ${coerceValue(params[index], name)};`;
+            return `local${index} = ${coerceValue(params[index], name)};`;
         });
         const body = compiler.compile(expr);
-        const closureNames = compiler.closure.map((_val, index) => `closure${index}`);
         const hasResult = (results !== b.none);
         const func = `
             return async (${paramNames.join(', ')}) => {
                 const instance = ${inst};
-                const frame = new ${frame}(instance, ${defaults}.slice(), ${meta}.maxDepth);
+                const frame = new ${frame}(instance);
                 ${
                     compiler.maxDepth
                     ? `let ${compiler.stackVars(compiler.maxDepth).join(`, `)};`
                     : ``
                 }
-                const locals = frame.locals;
+                ${
+                    compiler.localDefaults.length
+                    ? `let ${compiler.localInits().join(`, `)};`
+                    : ``
+                }
                 const table = instance.table;
                 ${setArgs.join('\n')}
                 ${body}
                 ${hasResult ? `return ${compiler.pop()};` : ``}
             };
         `;
+        const closureNames = compiler.closure.map((_val, index) => `closure${index}`);
         const args = closureNames.concat([func]);
         console.log({closureNames, closure: compiler.closure})
         console.log(func);
@@ -510,6 +508,17 @@ class Compiler {
         return 'closure' + index;
     }
 
+    literal(value) {
+        switch (typeof value) {
+            case 'number':
+                return JSON.stringify(value);
+            case 'bigint':
+                return `${value}n`;
+            default:
+                return this.enclose(value);
+        }
+    }
+
     label(name) {
         let index = this.labels.indexOf(name);
         if (index === -1) {
@@ -522,16 +531,29 @@ class Compiler {
         const node = this.enclose(expr);
         return `if (instance.callback) {
             frame.stack = [${this.stackVars(this.stack.length).join(`, `)}];
+            frame.locals = [${this.localVars().join(`, `)}];
             await instance.callback(frame, ${node});
         }`;
     }
 
-    stackVars(max) {
+    vars(base, max) {
         const vars = new Array(max);
         for (let i = 0; i < max; i++) {
-            vars[i] = `stack${i}`;
+            vars[i] = `${base}${i}`;
         }
         return vars;
+    }
+
+    stackVars(max) {
+        return this.vars(`stack`, max);
+    }
+
+    localVars() {
+        return this.vars(`local`, this.localDefaults.length);
+    }
+
+    localInits() {
+        return this.localDefaults.map((value, index) => `local${index} = ${this.literal(value)}`);
     }
 
     push(val) {
@@ -708,7 +730,7 @@ class Compiler {
     _compileLocalGet(expr) {
         return `
             ${this.callback(expr)}
-            ${this.push(`locals[${expr.index}]`)}
+            ${this.push(`local${expr.index}`)}
         `;
     }
 
@@ -717,13 +739,13 @@ class Compiler {
             return `
                 ${this.compile(expr.value)}
                 ${this.callback(expr)}
-                locals[${expr.index}] = ${this.peek()};
+                local${expr.index} = ${this.peek()};
             `;
         } else {
             return `
                 ${this.compile(expr.value)}
                 ${this.callback(expr)}
-                locals[${expr.index}] = ${this.pop()};
+                local${expr.index} = ${this.pop()};
             `;
         }
     }
@@ -774,13 +796,13 @@ class Compiler {
         let value;
         if (expr.type == b.i64) {
             const {high, low} = expr.value;
-            value = this.enclose((BigInt(high | 0) << 32n) | BigInt(low >>> 0));
+            value = (BigInt(high | 0) << 32n) | BigInt(low >>> 0);
         } else {
-            value = JSON.stringify(expr.value);
+            value = expr.value;
         }
         return `
             ${this.callback(expr)}
-            ${this.push(value)}
+            ${this.push(this.literal(value))}
         `;
     }
     
