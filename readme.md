@@ -74,7 +74,7 @@ This is a great way to get started, but has several downsides:
 
 If it's worth pursuing this project, a custom JS-based WebAssembly parser would probably be a good investment. The ops module can be built as a dev dependency, so we just need to walk through the module and produce a suitable AST with exactly the information needed for execution and debugging in a format that's efficient to do it with.
 
-Each function is compiled via JavaScript source into an async function which maintains VM state for the frame (locals, stack, and a pointer to the AST node). The native JavaScript async stack is used to implement branches and loops; most other opcodes call into a stub WebAssembly module per opcode, popping input from and pushing output to the virtual stack.
+Each function is compiled via JavaScript source into an async function which maintains VM state for the frame (locals, stack, and a pointer to the AST node). JavaScript control structures are used to implement blocks, branches and loops; most other opcodes call into a stub WebAssembly module per opcode, while a few are implemented directly in JavaScript where the semantics are clear. The stack is kept virtually in local variables, as are the Wasm locals; when a debug callback is attached they are spilled into arrays for introspection.
 
 Single-stepping is possible by specifying a callback as an async function, and simply not returning until you're done. Each input opcode invokes the callback if it's provided, with the current execution frame and a pointer to the AST node. Set the function on `instance.callback`, and set back to null to disable.
 
@@ -87,6 +87,12 @@ No shared memory or SIMD or other non-MVP features are supported yet.
 Floating point types may not preserve NaN bit patterns due to JavaScript's canonicalizations, so code using NaN-boxing or other fancy techniques will have trouble.
 
 Eval permissions are required to create new code with the Function constructor. If it's required to deploy in an environment with eval disabled, something would have to be rigged up to provide the JS source separately (server-side compilation) and fill it with the appropriate closure state at runtime.
+
+# Debugger plans
+
+Need to think about general plans for supporting source-level and assembly-level debugging, which is desirable when connecting to native server-side processes as well.
+
+In the meantime, a narrower AST format for the parsed code would be helpful in setting up a proto-debugger that's not dependent on binaryen internal APIs.
 
 # Alternatives considered
 
