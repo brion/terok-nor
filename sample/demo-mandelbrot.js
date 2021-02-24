@@ -47,6 +47,7 @@ const imports = {
 
     console.log('Interpreted async execution:');
     const interp = await Interpreter.instantiate(wasm, imports);
+    /*
     function delay(ms) {
         return new Promise((resolve, reject) => {
             setTimeout(() => {
@@ -54,9 +55,7 @@ const imports = {
             }, ms);
         });
     }
-    /*
     interp.instance.callback = async(node) => {
-        console.log(node);
         await delay(50);
     };
     */

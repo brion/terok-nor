@@ -435,22 +435,11 @@ class Frame {
         this.stack = [];
     }
 
-    push(value) {
-        this.stack.push(value);
-    }
-
-    pop() {
-        const result = this.stack.pop();
-        if (result === undefined) {
-            throw new RangeError('stack underflow');
-        }
-        return result;
-    }
-
     popMultiple(num) {
+        const stack = this.stack;
         const vals = new Array(num);
         for (let i = num - 1; i >= 0; i--) {
-            vals[i] = this.pop();
+            vals[i] = stack.pop();
         }
         return vals;
     }
@@ -498,21 +487,6 @@ class Frame {
     escape(name) {
         throw new LabelEscape(this, name);
     }
-
-    /// Evaluate a single expression executor and return its result off the stack.
-    async evaluate(executor) {
-        await executor(this);
-        const value = this.pop();
-        return value;
-    }
-
-    /// Evaluate multiple expression executors and return their results as an array.
-    async evaluateMultiple(executors) {
-        for (let executor of executors) {
-            await executor(this);
-        }
-        return this.popMultiple(executors.length);
-    }
 }
 
 class Compiler {
@@ -541,9 +515,10 @@ class Compiler {
         const func = `
             return async (${paramNames.join(', ')}) => {
                 const frame = new ${frame}(${inst}, ${defaults}.slice());
+                const stack = frame.stack;
                 ${setArgs.join('\n')}
                 ${body}
-                ${hasResult ? `return frame.pop();` : ``}
+                ${hasResult ? `return stack.pop();` : ``}
             };
         `;
         const args = closureNames.concat([func]);
@@ -631,7 +606,7 @@ class Compiler {
             return `
                 ${condition}
                 ${callback}
-                if (frame.pop()) {
+                if (stack.pop()) {
                     ${ifTrue}
                 } else {
                     ${ifFalse}
@@ -641,7 +616,7 @@ class Compiler {
         return `
             ${condition}
             ${callback}
-            if (frame.pop()) {
+            if (stack.pop()) {
                 ${ifTrue}
             }
         `;
@@ -679,7 +654,7 @@ class Compiler {
             return `
                 ${condition}
                 ${callback}
-                if (frame.pop()) {
+                if (stack.pop()) {
                     break ${label};
                 }
             `;
@@ -703,7 +678,7 @@ class Compiler {
         return `
             ${condition}
             ${callback}
-            switch (frame.pop()) {
+            switch (stack.pop()) {
                 ${cases}
                 default:
                     break ${defaultLabel};
@@ -717,7 +692,7 @@ class Compiler {
         const argCount = expr.operands.length;
         const operands = this.compileMultiple(expr.operands);
         const hasResult = (expr.type !== b.none);
-        const push = hasResult ? `frame.push(result);` : ``;
+        const push = hasResult ? `stack.push(result);` : ``;
         return `
             {
                 ${operands}
@@ -736,14 +711,14 @@ class Compiler {
         const argCount = expr.operands.length;
         const operands = this.compileMultiple(expr.operands);
         const hasResult = (expr.type !== b.none);
-        const push = hasResult ? `frame.push(result);` : ``;
+        const push = hasResult ? `stack.push(result);` : ``;
 
         return `
             {
                 ${target}
                 ${operands}
                 const args = frame.popMultiple(${argCount});
-                const index = frame.pop();
+                const index = stack.pop();
                 ${callback}
                 const func = ${table}.get(index);
                 // @todo enforce signature matches
@@ -758,7 +733,7 @@ class Compiler {
         const index = expr.index;
         return `
             ${callback}
-            frame.push(frame.locals[${index}]);
+            stack.push(frame.locals[${index}]);
         `;
     }
 
@@ -766,12 +741,12 @@ class Compiler {
         const callback = this.callback(expr);
         const index = expr.index;
         const value = this.compile(expr.value);
-        const push = expr.isTee ? `frame.push(value);` : ``;
+        const push = expr.isTee ? `stack.push(value);` : ``;
         return `
             {
                 ${value}
                 ${callback}
-                const value = frame.pop();
+                const value = stack.pop();
                 frame.locals[${index}] = value;
                 ${push}
             }
@@ -784,7 +759,7 @@ class Compiler {
         const global = this.enclose(this.instance._globals[expr.name]);
         return `
             ${callback}
-            frame.push(${global}.value);
+            stack.push(${global}.value);
         `;
     }
 
@@ -795,7 +770,7 @@ class Compiler {
         return `
             ${value}
             ${callback}
-            ${global}.value = frame.pop();
+            ${global}.value = stack.pop();
         `;
     }
 
@@ -807,10 +782,10 @@ class Compiler {
         return `
             {
                 ${ptr}
-                const ptr = frame.pop();
+                const ptr = stack.pop();
                 ${callback}
                 const value = ${func}(ptr + ${offset});
-                frame.push(value);
+                stack.push(value);
             }
         `;
     }
@@ -827,8 +802,8 @@ class Compiler {
                 ${ptr}
                 ${value}
                 ${callback}
-                const value = frame.pop();
-                const ptr = frame.pop();
+                const value = stack.pop();
+                const ptr = stack.pop();
                 ${func}(ptr + ${offset}, value);
             }
         `;
@@ -847,7 +822,7 @@ class Compiler {
         // @todo might be more efficient for ints to use source
         return `
             ${callback}
-            frame.push(${enclosed});
+            stack.push(${enclosed});
         `;
     }
 
@@ -859,9 +834,9 @@ class Compiler {
             {
                 ${value}
                 ${callback}
-                const value = frame.pop();
+                const value = stack.pop();
                 const result = ${func}(value);
-                frame.push(result);
+                stack.push(result);
             }
         `;
     }
@@ -876,10 +851,10 @@ class Compiler {
                 ${left}
                 ${right}
                 ${callback}
-                const right = frame.pop();
-                const left = frame.pop();
+                const right = stack.pop();
+                const left = stack.pop();
                 const result = ${func}(left, right);
-                frame.push(result);
+                stack.push(result);
             }
         `;
     }
@@ -895,11 +870,11 @@ class Compiler {
                 ${ifFalse}
                 ${condition}
                 ${callback}
-                const cond = frame.pop();
-                const ifFalse = frame.pop();
-                const ifTrue = frame.pop();
+                const cond = stack.pop();
+                const ifFalse = stack.pop();
+                const ifTrue = stack.pop();
                 const result = cond ? ifTrue : ifFalse;
-                frame.push(result);
+                stack.push(result);
             }
         `;
     }
@@ -910,7 +885,7 @@ class Compiler {
         return `
             ${value}
             ${callback}
-            frame.pop();
+            stack.pop();
         `;
     }
 
@@ -919,7 +894,7 @@ class Compiler {
         const memory = this.enclose(this.instance._memory);
         return `
             ${callback}
-            frame.push(${memory}.buffer.length / 65536);
+            stack.push(${memory}.buffer.length / 65536);
         `;
     }
 
@@ -931,9 +906,9 @@ class Compiler {
             {
                 ${callback}
                 ${delta}
-                const delta = frame.pop();
+                const delta = stack.pop();
                 const result = ${memory}.grow(delta);
-                frame.push(result);
+                stack.push(result);
             }
         `;
     }
@@ -945,7 +920,7 @@ class Compiler {
             return `
                 ${value}
                 ${callback}
-                return frame.pop();
+                return stack.pop();
             `;
         } else {
             return `
