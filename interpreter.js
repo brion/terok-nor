@@ -760,13 +760,28 @@ class Compiler {
             ${this.push(value)}
         `;
     }
+    
+    unaryOp(op) {
+        switch (op) {
+        case b.NegFloat32:
+        case b.NegFloat64:
+            return `-operand`;
+        case b.PromoteFloat32:
+            return `operand`;
+        default:
+            const func = this.enclose(this.instance._ops.binary[op]);
+            return `${func}(operand)`;
+        }
+    }
 
     _compileUnary(expr) {
-        const func = this.enclose(this.instance._ops.unary[expr.op]);
         return `
             ${this.compile(expr.value)}
             ${this.callback(expr)}
-            ${this.push(`${func}(${this.pop()})`)};
+            {
+                const operand = ${this.pop()};
+                ${this.push(this.unaryOp(expr.op))}
+            }
         `;
     }
 
@@ -805,7 +820,6 @@ class Compiler {
             case b.LtUInt32:
                 return `(left >>> 0) < (right >>> 0)`;
             case b.LtFloat32:
-                return `left < right`;
             case b.LtFloat64:
                 return `left < right`;
             case b.LeSInt32:
@@ -813,7 +827,6 @@ class Compiler {
             case b.LeUInt32:
                 return `(left >>> 0) <= (right >>> 0)`;
             case b.LeFloat32:
-                return `left <= right`;
             case b.LeFloat64:
                 return `left <= right`;
             case b.GtSInt32:
@@ -821,7 +834,6 @@ class Compiler {
             case b.GtUInt32:
                 return `(left >>> 0) > (right >>> 0)`;
             case b.GtFloat32:
-                return `left > right`;
             case b.GtFloat64:
                 return `left > right`;
             case b.GeSInt32:
@@ -829,7 +841,6 @@ class Compiler {
             case b.GeUInt32:
                 return `(left >>> 0) >= (right >>> 0)`;
             case b.GeFloat32:
-                return `left >= right`;
             case b.GeFloat64:
                 return `left >= right`;
             default:
