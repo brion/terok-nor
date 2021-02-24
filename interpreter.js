@@ -197,9 +197,22 @@ class Instance {
                     // Imports; note import functions may be sync or async.
                     const imported = imports[func.module][func.base];
                     if (imported instanceof Function) {
-                        thunk = async (...args) => {
-                            return await imported(...args);
-                        };
+                        // @todo reuse thunk functions for same types?
+                        const argNames = b.expandType(func.params).map((_, index) => `param${index}`);
+                        const argList = argNames.join(', ');
+                        let result;
+                        const code = `
+                            return async (${argList}) => {
+                                ${
+                                    result = `await imported(${argList})`,
+                                    func.results === b.none
+                                        ? `${result};`
+                                        : `return ${coerceValue(func.results, result)};`
+                                }
+                            };
+                        `;
+                        console.log(code);
+                        thunk = (new Function('imported', code))(imported);
                     } else {
                         throw new RangeError("Expected function for import");
                     }
@@ -728,7 +741,9 @@ class Compiler {
                 index = this.pop(),
                 // @todo enforce signature matches
                 result = `await (table.get(${index}))(${args})`,
-                hasResult ? this.push(result) : result
+                hasResult
+                    ? this.push(result)
+                    : `${result};`
             }
         `;
     }
