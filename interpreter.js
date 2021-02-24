@@ -452,6 +452,7 @@ class Compiler {
         const func = `
             return async (${paramNames.join(', ')}) => {
                 const instance = ${inst};
+                const table = instance.table;
                 const frame = new ${frame}(instance);
                 ${
                     compiler.maxDepth
@@ -463,7 +464,9 @@ class Compiler {
                     ? `let ${compiler.localInits().join(`, `)};`
                     : ``
                 }
-                const table = instance.table;
+                function spillLocals() {
+                    return [${compiler.localVars().join(`, `)}];
+                }
                 ${setArgs.join('\n')}
                 ${body}
                 ${hasResult ? `return ${compiler.pop()};` : ``}
@@ -531,7 +534,7 @@ class Compiler {
         const node = this.enclose(expr);
         return `if (instance.callback) {
             frame.stack = [${this.stackVars(this.stack.length).join(`, `)}];
-            frame.locals = [${this.localVars().join(`, `)}];
+            frame.locals = spillLocals();
             await instance.callback(frame, ${node});
         }`;
     }
