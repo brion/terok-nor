@@ -519,6 +519,7 @@ class Compiler {
                 const frame = new ${frame}(instance, ${defaults}.slice());
                 const stack = frame.stack;
                 const locals = frame.locals;
+                const table = instance.table;
                 ${setArgs.join('\n')}
                 ${body}
                 ${hasResult ? `return stack.pop();` : ``}
@@ -709,7 +710,6 @@ class Compiler {
 
     _compileCallIndirect(expr) {
         const callback = this.callback(expr);
-        const table = this.enclose(this.instance._table);
         const target = this.compile(expr.target);
         const argCount = expr.operands.length;
         const operands = this.compileMultiple(expr.operands);
@@ -723,7 +723,7 @@ class Compiler {
                 const args = frame.popMultiple(${argCount});
                 const index = stack.pop();
                 ${callback}
-                const func = ${table}.get(index);
+                const func = table.get(index);
                 // @todo enforce signature matches
                 const result = await func(...args);
                 ${push}
