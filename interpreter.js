@@ -540,10 +540,12 @@ class Compiler {
         return `stack[${depth - 1}]`;
     }
 
-    popMultiple(num) {
-        const depth = this.stack.length;
-        this.stack.splice(depth - num, num);
-        return `stack.slice(${depth - num}, ${depth})`;
+    popArgs(num) {
+        const items = new Array(num);
+        for (let i = num - 1; i >= 0; i--) {
+            items[i] = this.pop();
+        }
+        return items.join(', ');
     }
 
     saveStack() {
@@ -661,8 +663,8 @@ class Compiler {
             ${this.compileMultiple(expr.operands)}
             ${this.callback(expr)}
             ${
-                args = this.popMultiple(expr.operands.length),
-                result = `await ${func}(...${args})`,
+                args = this.popArgs(expr.operands.length),
+                result = `await ${func}(${args})`,
                 hasResult ? this.push(result) : result
             }
         `;
@@ -676,10 +678,10 @@ class Compiler {
             ${this.compileMultiple(expr.operands)}
             ${this.callback(expr)}
             ${
-                args = this.popMultiple(expr.operands.length),
+                args = this.popArgs(expr.operands.length),
                 index = this.pop(),
                 // @todo enforce signature matches
-                result = `await (table.get(${index}))(...${args})`,
+                result = `await (table.get(${index}))(${args})`,
                 hasResult ? this.push(result) : result
             }
         `;
