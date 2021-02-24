@@ -507,7 +507,7 @@ class Compiler {
         const defaults = compiler.enclose(compiler.localDefaults);
         const paramNames = params.map((_type, index) => `param${index}`);
         const setArgs = paramNames.map((name, index) => {
-            return `frame.locals[${index}] = ${coerceValue(params[index], name)};`;
+            return `locals[${index}] = ${coerceValue(params[index], name)};`;
         });
         const body = compiler.compile(expr);
         const closureNames = compiler.closure.map((_val, index) => `closure${index}`);
@@ -516,6 +516,7 @@ class Compiler {
             return async (${paramNames.join(', ')}) => {
                 const frame = new ${frame}(${inst}, ${defaults}.slice());
                 const stack = frame.stack;
+                const locals = frame.locals;
                 ${setArgs.join('\n')}
                 ${body}
                 ${hasResult ? `return stack.pop();` : ``}
@@ -733,7 +734,7 @@ class Compiler {
         const index = expr.index;
         return `
             ${callback}
-            stack.push(frame.locals[${index}]);
+            stack.push(locals[${index}]);
         `;
     }
 
@@ -747,7 +748,7 @@ class Compiler {
                 ${value}
                 ${callback}
                 const value = stack.pop();
-                frame.locals[${index}] = value;
+                locals[${index}] = value;
                 ${push}
             }
 
