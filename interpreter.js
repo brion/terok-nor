@@ -682,7 +682,7 @@ class Compiler {
     _compileLocalGet(expr) {
         return `
             ${this.callback(expr)}
-            ${this.push(`locals[${expr.index}]`)};
+            ${this.push(`locals[${expr.index}]`)}
         `;
     }
 
