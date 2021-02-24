@@ -460,7 +460,11 @@ class Compiler {
             return async (${paramNames.join(', ')}) => {
                 const instance = ${inst};
                 const frame = new ${frame}(instance, ${defaults}.slice(), ${meta}.maxDepth);
-                const stack = frame.stack;
+                ${
+                    compiler.maxDepth
+                    ? `let ${compiler.stackVars(compiler.maxDepth).join(`, `)};`
+                    : ``
+                }
                 const locals = frame.locals;
                 const table = instance.table;
                 ${setArgs.join('\n')}
@@ -517,8 +521,17 @@ class Compiler {
     callback(expr) {
         const node = this.enclose(expr);
         return `if (instance.callback) {
+            frame.stack = [${this.stackVars(this.stack.length).join(`, `)}];
             await instance.callback(frame, ${node});
         }`;
+    }
+
+    stackVars(max) {
+        const vars = new Array(max);
+        for (let i = 0; i < max; i++) {
+            vars[i] = `stack${i}`;
+        }
+        return vars;
     }
 
     push(val) {
@@ -526,18 +539,23 @@ class Compiler {
         if (depth > this.maxDepth) {
             this.maxDepth = depth;
         }
-        return `stack[${depth - 1}] = ${val};`;
+        return `stack${depth - 1} = ${val};`;
     }
 
     pop() {
         const depth = this.stack.length;
         this.stack.pop();
-        return `stack[${depth - 1}]`;
+        return `stack${depth - 1}`;
+    }
+
+    drop() {
+        this.stack.pop();
+        return ``;
     }
 
     peek() {
         const depth = this.stack.length;
-        return `stack[${depth - 1}]`;
+        return `stack${depth - 1}`;
     }
 
     popArgs(num) {
@@ -558,7 +576,7 @@ class Compiler {
 
         const copies = [];
         for (let i = 0; i < preserve; i++) {
-            copies.push(`stack[${saved} + ${i}] = stack[${depth - preserve} + ${i}]`);
+            copies.push(`stack${saved + i} = stack${(depth - preserve) + i}`);
         }
         return copies.join('\n');
     }
@@ -883,7 +901,7 @@ class Compiler {
         return `
             ${this.compile(expr.value)}
             ${this.callback(expr)}
-            ${this.pop()};
+            ${this.drop()};
         `;
     }
 
