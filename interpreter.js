@@ -444,9 +444,6 @@ class Compiler {
         const inst = compiler.enclose(instance);
         const frame = compiler.enclose(Frame);
         const paramNames = params.map((_type, index) => `param${index}`);
-        const setArgs = paramNames.map((name, index) => {
-            return `local${index} = ${coerceValue(params[index], name)};`;
-        });
         const body = compiler.compile(expr);
         const hasResult = (results !== b.none);
         const func = `
@@ -461,13 +458,12 @@ class Compiler {
                 }
                 ${
                     compiler.localDefaults.length
-                    ? `let ${compiler.localInits().join(`, `)};`
+                    ? `let ${compiler.localInits(paramNames).join(`, `)};`
                     : ``
                 }
                 function spillLocals() {
                     return [${compiler.localVars().join(`, `)}];
                 }
-                ${setArgs.join('\n')}
                 ${body}
                 ${hasResult ? `return ${compiler.pop()};` : ``}
             };
@@ -555,8 +551,15 @@ class Compiler {
         return this.vars(`local`, this.localDefaults.length);
     }
 
-    localInits() {
-        return this.localDefaults.map((value, index) => `local${index} = ${this.literal(value)}`);
+    localInits(paramNames) {
+        return this.localDefaults.map((value, index) => {
+            if (index < paramNames.length) {
+                const type = this.paramTypes[index];
+                const name = paramNames[index];
+                return `local${index} = ${coerceValue(type, name)}`;
+            }
+            return `local${index} = ${this.literal(value)}`;
+        });
     }
 
     push(val) {
