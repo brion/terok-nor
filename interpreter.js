@@ -742,17 +742,23 @@ class Compiler {
         const callback = this.callback(expr);
         const index = expr.index;
         const value = this.compile(expr.value);
-        const push = expr.isTee ? `stack.push(value);` : ``;
-        return `
-            {
-                ${value}
-                ${callback}
-                const value = stack.pop();
-                locals[${index}] = value;
-                ${push}
-            }
-
-        `;
+        if (expr.isTee) {
+            return `
+                {
+                    ${value}
+                    ${callback}
+                    locals[${index}] = stack[stack.length - 1];
+                }
+            `;
+        } else {
+            return `
+                {
+                    ${value}
+                    ${callback}
+                    locals[${index}] = stack.pop();
+                }
+            `;
+        }
     }
 
     _compileGlobalGet(expr) {
