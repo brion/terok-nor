@@ -604,7 +604,7 @@ class Compiler {
 
         const copies = [];
         for (let i = 0; i < preserve; i++) {
-            copies.push(`stack${saved + i} = stack${(depth - preserve) + i}`);
+            copies.push(`stack${saved + i} = stack${(depth - preserve) + i};`);
         }
         return copies.join('\n');
     }
@@ -616,7 +616,7 @@ class Compiler {
             return `
                 ${this.callback(expr)}
                 {
-                    ${saved = this.saveStack()}
+                    ${(saved = this.saveStack()), ``}
                     ${label = this.label(expr.name)}:
                     for (;;) {
                         ${this.compileMultiple(expr.children)}
@@ -655,7 +655,7 @@ class Compiler {
         return `
             ${this.callback(expr)}
             {
-                ${saved = this.saveStack()}
+                ${(saved = this.saveStack()), ``}
                 ${outer = this.label(expr.name + '$$loop')}:
                 for (;;) {
                     ${inner = this.label(expr.name)}:
@@ -841,8 +841,6 @@ class Compiler {
                 return `${left} - ${right} | 0`;
             case b.SubFloat64:
                 return `${left} - ${right}`;
-            case b.MulInt32:
-                return `Math.imul(${left}, ${right})`;
             case b.MulFloat64:
                 return `${left} * ${right}`;
             case b.DivFloat64:
@@ -860,35 +858,35 @@ class Compiler {
             case b.ShrUInt32:
                 return `(${left} >>> ${right}) | 0`;
             case b.EqInt32:
-                return `${left} === ${right}`;
+                return `(${left} === ${right}) |0`;
             case b.LtSInt32:
-                return `${left} < ${right}`;
+                return `(${left} < ${right}) | 0`;
             case b.LtUInt32:
-                return `(${left} >>> 0) < (${right} >>> 0)`;
+                return `((${left} >>> 0) < (${right} >>> 0)) | 0`;
             case b.LtFloat32:
             case b.LtFloat64:
-                return `${left} < ${right}`;
+                return `(${left} < ${right}) | 0`;
             case b.LeSInt32:
-                return `${left} <= ${right}`;
+                return `(${left} <= ${right}) | 0`;
             case b.LeUInt32:
-                return `(${left} >>> 0) <= (${right} >>> 0)`;
+                return `((${left} >>> 0) <= (${right} >>> 0)) | 0`;
             case b.LeFloat32:
             case b.LeFloat64:
-                return `${left} <= ${right}`;
+                return `(${left} <= ${right}) | 0`;
             case b.GtSInt32:
-                return `${left} > ${right}`;
+                return `(${left} > ${right}) | 0`;
             case b.GtUInt32:
-                return `(${left} >>> 0) > (${right} >>> 0)`;
+                return `((${left} >>> 0) > (${right} >>> 0)) | 0`;
             case b.GtFloat32:
             case b.GtFloat64:
-                return `${left} > ${right}`;
+                return `(${left} > ${right}) | 0`;
             case b.GeSInt32:
-                return `${left} >= ${right}`;
+                return `(${left} >= ${right}) | 0`;
             case b.GeUInt32:
-                return `(${left} >>> 0) >= (${right} >>> 0)`;
+                return `((${left} >>> 0) >= (${right} >>> 0)) | 0`;
             case b.GeFloat32:
             case b.GeFloat64:
-                return `${left} >= ${right}`;
+                return `(${left} >= ${right}) | 0`;
             default:
                 const func = this.enclose(this.instance._ops.binary[op]);
                 return `${func}(${left}, ${right})`;
