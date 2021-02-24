@@ -535,6 +535,11 @@ class Compiler {
         return `stack[${depth - 1}]`;
     }
 
+    peek() {
+        const depth = this.stack.length;
+        return `stack[${depth - 1}]`;
+    }
+
     popMultiple(num) {
         const depth = this.stack.length;
         this.stack.splice(depth - num, num);
@@ -692,7 +697,7 @@ class Compiler {
             return `
                 ${this.compile(expr.value)}
                 ${this.callback(expr)}
-                ${this.push(`locals[${expr.index}] = ${this.pop()}`)}
+                locals[${expr.index}] = ${this.peek()};
             `;
         } else {
             return `
