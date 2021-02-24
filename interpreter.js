@@ -108,6 +108,7 @@ class Module {
 class Instance {
     constructor(module, imports) {
         this.exports = {};
+        this.callback = null;
 
         this._mod = module._mod;
         this._globals = {};
@@ -514,7 +515,8 @@ class Compiler {
         const hasResult = (results !== b.none);
         const func = `
             return async (${paramNames.join(', ')}) => {
-                const frame = new ${frame}(${inst}, ${defaults}.slice());
+                const instance = ${inst};
+                const frame = new ${frame}(instance, ${defaults}.slice());
                 const stack = frame.stack;
                 const locals = frame.locals;
                 ${setArgs.join('\n')}
@@ -524,6 +526,7 @@ class Compiler {
         `;
         const args = closureNames.concat([func]);
         console.log({args, closure: compiler.closure})
+        console.log(func);
         return Reflect.construct(Function, args).apply(null, compiler.closure);
     }
 
@@ -568,10 +571,9 @@ class Compiler {
     }
 
     callback(expr) {
-        const instance = this.enclose(this.instance);
         const node = this.enclose(expr);
-        return `if (${instance}.callback) {
-            await ${instance}.callback(${node});
+        return `if (instance.callback) {
+            await instance.callback(${node});
         }`;
     }
 
@@ -582,8 +584,8 @@ class Compiler {
         const children = this.compileMultiple(expr.children);
         if (label) {
             return `
+                ${callback}
                 {
-                    ${callback}
                     const saved = frame.saveStack();
                     ${label}:
                     for (;;) {
@@ -631,8 +633,8 @@ class Compiler {
         const inner = this.label(name);
         const body = this.compile(expr.body);
         return `
+            ${callback}
             {
-                ${callback}
                 const saved = frame.saveStack();
                 ${outer}:
                 for (;;) {
@@ -695,8 +697,8 @@ class Compiler {
         const hasResult = (expr.type !== b.none);
         const push = hasResult ? `stack.push(result);` : ``;
         return `
+            ${operands}
             {
-                ${operands}
                 const args = frame.popMultiple(${argCount});
                 ${callback}
                 const result = await ${func}(...args);
@@ -715,9 +717,9 @@ class Compiler {
         const push = hasResult ? `stack.push(result);` : ``;
 
         return `
+            ${target}
+            ${operands}
             {
-                ${target}
-                ${operands}
                 const args = frame.popMultiple(${argCount});
                 const index = stack.pop();
                 ${callback}
@@ -744,19 +746,15 @@ class Compiler {
         const value = this.compile(expr.value);
         if (expr.isTee) {
             return `
-                {
-                    ${value}
-                    ${callback}
-                    locals[${index}] = stack[stack.length - 1];
-                }
+                ${value}
+                ${callback}
+                locals[${index}] = stack[stack.length - 1];
             `;
         } else {
             return `
-                {
-                    ${value}
-                    ${callback}
-                    locals[${index}] = stack.pop();
-                }
+                ${value}
+                ${callback}
+                locals[${index}] = stack.pop();
             `;
         }
     }
@@ -784,34 +782,30 @@ class Compiler {
     _compileLoad(expr) {
         const callback = this.callback(expr);
         const ptr = this.compile(expr.ptr);
-        const offset = expr.offset;
+        const offset = expr.offset ? ` + ${expr.offset}` : ``;
         const func = this.enclose(this.instance._ops.memory.load[expr.type][expr.bytes << 3][expr.isSigned ? 'signed' : 'unsigned']);
         return `
-            {
-                ${ptr}
-                const ptr = stack.pop();
-                ${callback}
-                const value = ${func}(ptr + ${offset});
-                stack.push(value);
-            }
+            ${ptr}
+            ${callback}
+            stack.push(${func}(stack.pop()${offset}));
         `;
     }
 
     _compileStore(expr) {
         const callback = this.callback(expr);
         const ptr = this.compile(expr.ptr);
-        const offset = expr.offset;
+        const offset = expr.offset ? ` + ${expr.offset}` : ``;
         const value = this.compile(expr.value);
         const valueInfo = b.getExpressionInfo(expr.value);
         const func = this.enclose(this.instance._ops.memory.store[valueInfo.type][expr.bytes << 3]);
         return `
+            ${ptr}
+            ${value}
+            ${callback}
             {
-                ${ptr}
-                ${value}
-                ${callback}
                 const value = stack.pop();
-                const ptr = stack.pop();
-                ${func}(ptr + ${offset}, value);
+                const ptr = stack.pop()${offset};
+                ${func}(ptr, value);
             }
         `;
     }
@@ -821,15 +815,13 @@ class Compiler {
         let value;
         if (expr.type == b.i64) {
             const {high, low} = expr.value;
-            value = (BigInt(high | 0) << 32n) | BigInt(low >>> 0);
+            value = this.enclose((BigInt(high | 0) << 32n) | BigInt(low >>> 0));
         } else {
-            value = expr.value;
+            value = JSON.stringify(expr.value);
         }
-        const enclosed = this.enclose(value);
-        // @todo might be more efficient for ints to use source
         return `
             ${callback}
-            stack.push(${enclosed});
+            stack.push(${value});
         `;
     }
 
@@ -838,13 +830,9 @@ class Compiler {
         const value = this.compile(expr.value);
         const func = this.enclose(this.instance._ops.unary[expr.op]);
         return `
-            {
-                ${value}
-                ${callback}
-                const value = stack.pop();
-                const result = ${func}(value);
-                stack.push(result);
-            }
+            ${value}
+            ${callback}
+            stack.push(${func}(stack.pop()));
         `;
     }
 
@@ -854,14 +842,13 @@ class Compiler {
         const right = this.compile(expr.right);
         const func = this.enclose(this.instance._ops.binary[expr.op]);
         return `
+            ${left}
+            ${right}
+            ${callback}
             {
-                ${left}
-                ${right}
-                ${callback}
                 const right = stack.pop();
                 const left = stack.pop();
-                const result = ${func}(left, right);
-                stack.push(result);
+                stack.push(${func}(left, right));
             }
         `;
     }
@@ -872,16 +859,15 @@ class Compiler {
         const ifFalse = this.compile(expr.ifFalse);
         const condition = this.compile(expr.condition);
         return `
+            ${ifTrue}
+            ${ifFalse}
+            ${condition}
+            ${callback}
             {
-                ${ifTrue}
-                ${ifFalse}
-                ${condition}
-                ${callback}
                 const cond = stack.pop();
                 const ifFalse = stack.pop();
                 const ifTrue = stack.pop();
-                const result = cond ? ifTrue : ifFalse;
-                stack.push(result);
+                stack.push(cond ? ifTrue : ifFalse);
             }
         `;
     }
@@ -910,9 +896,9 @@ class Compiler {
         const memory = this.enclose(this.instance._memory);
         const delta = this.compile(expr.delta);
         return `
+            ${delta}
+            ${callback}
             {
-                ${callback}
-                ${delta}
                 const delta = stack.pop();
                 const result = ${memory}.grow(delta);
                 stack.push(result);
