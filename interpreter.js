@@ -4,6 +4,8 @@ const b = binaryen;
 const Global = WebAssembly.Global;
 const Memory = WebAssembly.Memory;
 
+const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
+
 /// Clone of WebAssembly.Table that lets us store JS async functions
 class Table {
     constructor({element, initial, maximum=undefined}) {
@@ -344,16 +346,16 @@ function defaultValue(type) {
 function coerceValue(type, value) {
     switch (type) {
         case b.i32:
-            return value | 0;
+            return `(${value} | 0)`;
         case b.i64:
-            return BigInt.asIntN(64, BigInt(value));
+            return `BigInt.asIntN(64, BigInt(${value}))`;
         case b.f32:
-            return Math.fround(value);
+            return `Math.fround(${value})`;
         case b.f64:
-            return +value;
+            return `+${value}`;
         default:
             // Assume others are reference types?
-            return value;
+            return `${value}`;
     }
 }
 
@@ -445,6 +447,14 @@ class Frame {
         return result;
     }
 
+    popMultiple(num) {
+        const vals = new Array(num);
+        for (let i = num - 1; i >= 0; i--) {
+            vals[i] = this.pop();
+        }
+        return vals;
+    }
+
     saveStack() {
         return this.stack.length;
     }
@@ -501,12 +511,7 @@ class Frame {
         for (let executor of executors) {
             await executor(this);
         }
-        const len = executors.length;
-        const vals = new Array(len);
-        for (let i = len - 1; i >= 0; i--) {
-            vals[i] = this.pop();
-        }
-        return vals;
+        return this.popMultiple(executors.length);
     }
 }
 
@@ -515,242 +520,322 @@ class Compiler {
         this.instance = instance;
         this.paramTypes = params.slice();
         this.localDefaults = params.concat(vars).map(defaultValue);
+        this.closure = [];
+        this.closureMap = new Map();
+        this.labels = [];
+        this.sources = [];
+    }
+
+    static compileBase(instance, expr, params, results, vars) {
+        const compiler = new Compiler(instance, params, vars);
+        const frame = compiler.enclose(Frame);
+        const inst = compiler.enclose(instance);
+        const defaults = compiler.enclose(compiler.localDefaults);
+        const paramNames = params.map((_type, index) => `param${index}`);
+        const setArgs = paramNames.map((name, index) => {
+            return `frame.locals[${index}] = ${coerceValue(params[index], name)};`;
+        });
+        const body = compiler.compile(expr);
+        const closureNames = compiler.closure.map((_val, index) => `closure${index}`);
+        const hasResult = (results !== b.none);
+        const func = `
+            return async (${paramNames.join(', ')}) => {
+                const frame = new ${frame}(${inst}, ${defaults}.slice());
+                ${setArgs.join('\n')}
+                ${body}
+                ${hasResult ? `return frame.pop();` : ``}
+            };
+        `;
+        const args = closureNames.concat([func]);
+        console.log({args, closure: compiler.closure})
+        return Reflect.construct(Function, args).apply(null, compiler.closure);
     }
 
     static compileFunction(instance, func) {
-        const hasResult = (func.results !== b.none);
-        const resultCount = hasResult ? 1 : 0;
-        const compiler = new Compiler(instance, b.expandType(func.params), func.vars);
-        const executor = compiler.compile(func.body);
-        return async (...args) => {
-            const locals = compiler.initializeLocals(args);
-            const frame = new Frame(instance, locals);
-            await frame.block(ReturnLabel, resultCount, async () => {
-                await executor(frame);
-            });
-            if (hasResult) {
-                return frame.pop();
-            } else {
-                return;
-            }
-        }
+        return Compiler.compileBase(instance, func.body, b.expandType(func.params), func.results, func.vars)
     }
 
     static compileExpression(instance, expr) {
-        const compiler = new Compiler(instance);
-        const executor = compiler.compile(expr);
-        return async () => {
-            const frame = new Frame(instance);
-            await executor(frame);
-            return frame.pop();
-        };
+        return Compiler.compileBase(instance, expr, [], expr.type, []);
     }
 
-    initializeLocals(args) {
-        const paramTypes = this.paramTypes;
-        const locals = this.localDefaults.slice();
-        const len = Math.min(paramTypes.length, args.length);
-        for (let i = 0; i < len; i++) {
-            locals[i] = coerceValue(paramTypes[i], args[i]);
-        }
-        return locals;
-    }
-
-    /// Compile a single expression from the AST into an async function
+    /// Compile a single expression from the AST into some JS async function source
     compile(expression) {
-        if (!expression) {
-            throw new Error('where am i');
-        }
         const expr = b.getExpressionInfo(expression);
         const handler = expressionMap(expr.id);
         if (this[handler]) {
-            const executor = this[handler](expr);
-            return executor;
+            return this[handler](expr);
         } else {
             throw new RangeError("Cannot compile unknown expression");
         }
     }
 
     compileMultiple(expressions) {
-        return expressions.map((expression) => this.compile(expression));
+        return expressions.map((expression) => this.compile(expression)).join('\n');
+    }
+
+    enclose(val) {
+        let index = this.closureMap.get(val);
+        if (index === undefined) {
+            index = this.closure.push(val) - 1;
+            this.closureMap.set(val, index);
+        }
+        return 'closure' + index;
+    }
+
+    label(name) {
+        let index = this.labels.indexOf(name);
+        if (index === -1) {
+            index = this.labels.push(name) - 1;
+        }
+        return 'label' + index;
+    }
+
+    callback(expr) {
+        const instance = this.enclose(this.instance);
+        const node = this.enclose(expr);
+        return `if (${instance}.callback) {
+            await ${instance}.callback(${node});
+        }`;
     }
 
     _compileBlock(expr) {
-        const name = expr.name;
+        const callback = this.callback(expr);
         const results = resultCount(expr.type);
+        const label = expr.name === '' ? null : this.label(expr.name);
         const children = this.compileMultiple(expr.children);
-        return async (frame) => {
-            await frame.block(name, results, async () => {
-                for (let child of children) {
-                    await child(frame);
+        if (label) {
+            return `
+                {
+                    ${callback}
+                    const saved = frame.saveStack();
+                    ${label}:
+                    for (;;) {
+                        ${children}
+                        break ${label};
+                    }
+                    frame.restoreStack(saved, ${results});
                 }
-            });
-        };
+            `;
+        } else {
+            return children;
+        }
     }
 
     _compileIf(expr) {
-        const cond = this.compile(expr.condition);
+        const callback = this.callback(expr);
+        const condition = this.compile(expr.condition);
         const ifTrue = this.compile(expr.ifTrue);
-        const ifFalse = expr.ifFalse ? this.compile(expr.ifFalse) : null;
-        return async (frame) => {
-            await cond(frame);
-            if (frame.pop()) {
-                await ifTrue(frame);
-            } else if (ifFalse) {
-                await ifFalse(frame);
-            }
+        if (expr.ifFalse) {
+            const ifFalse = this.compile(expr.ifFalse);
+            return `
+                ${condition}
+                ${callback}
+                if (frame.pop()) {
+                    ${ifTrue}
+                } else {
+                    ${ifFalse}
+                }
+            `;
         }
+        return `
+            ${condition}
+            ${callback}
+            if (frame.pop()) {
+                ${ifTrue}
+            }
+        `;
     }
 
     _compileLoop(expr) {
+        const callback = this.callback(expr);
         const name = expr.name;
         const results = resultCount(expr.type);
+        const outer = this.label(name + '$$loop');
+        const inner = this.label(name);
         const body = this.compile(expr.body);
-        return async (frame) => {
-            await frame.loop(name, results, async () => {
-                await body(frame);
-            });
-        };
+        return `
+            {
+                ${callback}
+                const saved = frame.saveStack();
+                ${outer}:
+                for (;;) {
+                    ${inner}:
+                    for (;;) {
+                        ${body}
+                        break ${outer};
+                    }
+                }
+                frame.restoreStack(saved, ${results});
+            }
+        `;
     }
 
     _compileBreak(expr) {
-        const name = expr.name;
+        const callback = this.callback(expr);
+        const label = this.label(expr.name);
         if (expr.condition) {
-            const conditionExpr = this.compile(expr.condition);
-            return async (frame) => {
-                await conditionExpr(frame);
+            const condition = this.compile(expr.condition);
+            return `
+                ${condition}
+                ${callback}
                 if (frame.pop()) {
-                    frame.escape(name);
+                    break ${label};
                 }
-            };
+            `;
+        } else {
+            return `
+                ${callback}
+                break ${label};
+            `;
         }
-        return async (frame) => {
-            frame.escape(name);
-        };
     }
 
     _compileSwitch(expr) {
-        const conditionExpr = this.compile(expr.condition);
-        const names = expr.names;
-        const defaultName = expr.defaultName;
-        return async (frame) => {
-            await conditionExpr(frame);
-            const index = frame.pop();
-            if (names[index]) {
-                frame.escape(names[index]);
-            } else {
-                frame.escape(defaultName);
+        const callback = this.callback(expr);
+        const condition = this.compile(expr.condition);
+        const defaultLabel = this.label(expr.defaultName);
+        const labels = expr.names.map((name) => this.label(name));
+        const cases = labels.map((label, index) => `
+            case ${index}:
+                break ${label};
+        `).join('\n');
+        return `
+            ${condition}
+            ${callback}
+            switch (frame.pop()) {
+                ${cases}
+                default:
+                    break ${defaultLabel};
             }
-        };
+        `;
     }
 
     _compileCall(expr) {
+        const callback = this.callback(expr);
+        const func = this.enclose(this.instance._funcs[expr.target]);
+        const argCount = expr.operands.length;
         const operands = this.compileMultiple(expr.operands);
-        const func = this.instance._funcs[expr.target];
         const hasResult = (expr.type !== b.none);
-
-        return async (frame) => {
-            const args = await frame.evaluateMultiple(operands);
-            const result = await func(...args);
-
-            // @todo may need to support multiple returns later
-            if (hasResult) {
-                frame.push(result);
+        const push = hasResult ? `frame.push(result);` : ``;
+        return `
+            {
+                ${operands}
+                const args = frame.popMultiple(${argCount});
+                ${callback}
+                const result = await ${func}(...args);
+                ${push}
             }
-        };
+        `;
     }
 
     _compileCallIndirect(expr) {
+        const callback = this.callback(expr);
+        const table = this.enclose(this.instance._table);
+        const target = this.compile(expr.target);
+        const argCount = expr.operands.length;
         const operands = this.compileMultiple(expr.operands);
-        const targetExpr = this.compile(expr.target);
         const hasResult = (expr.type !== b.none);
-        const table = this.instance._table;
+        const push = hasResult ? `frame.push(result);` : ``;
 
-        return async (frame) => {
-            await targetExpr(frame);
-            const index = frame.pop();
-            const func = table.get(index);
-
-            // @todo enforce signature matches
-    
-            const args = await frame.evaluateMultiple(operands);
-            const result = await func(...args);
-
-            // @todo may need to support multiple returns later
-            if (hasResult) {
-                frame.push(result);
+        return `
+            {
+                ${target}
+                ${operands}
+                const args = frame.popMultiple(${argCount});
+                const index = frame.pop();
+                ${callback}
+                const func = ${table}.get(index);
+                // @todo enforce signature matches
+                const result = await func(...args);
+                ${push}
             }
-        };
+        `;
     }
 
     _compileLocalGet(expr) {
+        const callback = this.callback(expr);
         const index = expr.index;
-        return async (frame) => {
-            const value = frame.locals[index];
-            frame.push(value);
-        };
+        return `
+            ${callback}
+            frame.push(frame.locals[${index}]);
+        `;
     }
 
     _compileLocalSet(expr) {
+        const callback = this.callback(expr);
         const index = expr.index;
-        const valueExpr = this.compile(expr.value);
-        const isTee = expr.isTee;
-        return async (frame) => {
-            await valueExpr(frame);
-            const value = frame.pop();
-            frame.locals[index] = value;
-            if (isTee) {
-                frame.push(value);
+        const value = this.compile(expr.value);
+        const push = expr.isTee ? `frame.push(value);` : ``;
+        return `
+            {
+                ${value}
+                ${callback}
+                const value = frame.pop();
+                frame.locals[${index}] = value;
+                ${push}
             }
-        };
+
+        `;
     }
 
     _compileGlobalGet(expr) {
-        const global = this.instance._globals[expr.name];
-        return async (frame) => {
-            const value = global.value;
-            frame.push(value);
-        };
+        const callback = this.callback(expr);
+        const global = this.enclose(this.instance._globals[expr.name]);
+        return `
+            ${callback}
+            frame.push(${global}.value);
+        `;
     }
 
     _compileGlobalSet(expr) {
-        const global = this.instance._globals[expr.name];
-        const valueExpr = this.compile(expr.value);
-        return async (frame) => {
-            await valueExpr(frame);
-            const value = frame.pop();
-            global.value = value;
-        };
+        const callback = this.callback(expr);
+        const global = this.enclose(this.instance._globals[expr.name]);
+        const value = this.compile(expr.value);
+        return `
+            ${value}
+            ${callback}
+            ${global}.value = frame.pop();
+        `;
     }
 
     _compileLoad(expr) {
-        const ptrExpr = this.compile(expr.ptr);
+        const callback = this.callback(expr);
+        const ptr = this.compile(expr.ptr);
         const offset = expr.offset;
-        const func = this.instance._ops.memory.load[expr.type][expr.bytes << 3][expr.isSigned ? 'signed' : 'unsigned'];
-        return async (frame) => {
-            await ptrExpr(frame);
-            const ptr = frame.pop();
-            const value = func(ptr + offset);
-            frame.push(value);
-        };
+        const func = this.enclose(this.instance._ops.memory.load[expr.type][expr.bytes << 3][expr.isSigned ? 'signed' : 'unsigned']);
+        return `
+            {
+                ${ptr}
+                const ptr = frame.pop();
+                ${callback}
+                const value = ${func}(ptr + ${offset});
+                frame.push(value);
+            }
+        `;
     }
 
     _compileStore(expr) {
-        const ptrExpr = this.compile(expr.ptr);
+        const callback = this.callback(expr);
+        const ptr = this.compile(expr.ptr);
         const offset = expr.offset;
-        const valueExpr = this.compile(expr.value);
+        const value = this.compile(expr.value);
         const valueInfo = b.getExpressionInfo(expr.value);
-        const func = this.instance._ops.memory.store[valueInfo.type][expr.bytes << 3];
-        return async (frame) => {
-            await ptrExpr(frame);
-            await valueExpr(frame);
-            const value = frame.pop();
-            const ptr = frame.pop();
-            func(ptr + offset, value);
-        };
+        const func = this.enclose(this.instance._ops.memory.store[valueInfo.type][expr.bytes << 3]);
+        return `
+            {
+                ${ptr}
+                ${value}
+                ${callback}
+                const value = frame.pop();
+                const ptr = frame.pop();
+                ${func}(ptr + ${offset}, value);
+            }
+        `;
     }
 
     _compileConst(expr) {
+        const callback = this.callback(expr);
         let value;
         if (expr.type == b.i64) {
             const {high, low} = expr.value;
@@ -758,97 +843,129 @@ class Compiler {
         } else {
             value = expr.value;
         }
-        return async (frame) => {
-            frame.push(value);
-        };
+        const enclosed = this.enclose(value);
+        // @todo might be more efficient for ints to use source
+        return `
+            ${callback}
+            frame.push(${enclosed});
+        `;
     }
 
     _compileUnary(expr) {
-        const valueExpr = this.compile(expr.value);
-        const func = this.instance._ops.unary[expr.op];
-        return async (frame) => {
-            await valueExpr(frame);
-            const value = frame.pop();
-            const result = func(value);
-            frame.push(result);
-        };
+        const callback = this.callback(expr);
+        const value = this.compile(expr.value);
+        const func = this.enclose(this.instance._ops.unary[expr.op]);
+        return `
+            {
+                ${value}
+                ${callback}
+                const value = frame.pop();
+                const result = ${func}(value);
+                frame.push(result);
+            }
+        `;
     }
 
     _compileBinary(expr) {
-        const leftExpr = this.compile(expr.left);
-        const rightExpr = this.compile(expr.right);
-        const func = this.instance._ops.binary[expr.op];
-        return async (frame) => {
-            await leftExpr(frame);
-            await rightExpr(frame);
-            const right = frame.pop();
-            const left = frame.pop();
-            const result = func(left, right);
-            frame.push(result);
-        };
+        const callback = this.callback(expr);
+        const left = this.compile(expr.left);
+        const right = this.compile(expr.right);
+        const func = this.enclose(this.instance._ops.binary[expr.op]);
+        return `
+            {
+                ${left}
+                ${right}
+                ${callback}
+                const right = frame.pop();
+                const left = frame.pop();
+                const result = ${func}(left, right);
+                frame.push(result);
+            }
+        `;
     }
 
     _compileSelect(expr) {
-        const ifTrueExpr = this.compile(expr.ifTrue);
-        const ifFalseExpr = this.compile(expr.ifFalse);
-        const condExpr = this.compile(expr.condition);
-        return async (frame) => {
-            await ifTrueExpr(frame);
-            await ifFalseExpr(frame);
-            await condExpr(frame);
-            const cond = frame.pop();
-            const ifFalse = frame.pop();
-            const ifTrue = frame.pop();
-            const result = cond ? ifTrue : ifFalse;
-            frame.push(result);
-        };
+        const callback = this.callback(expr);
+        const ifTrue = this.compile(expr.ifTrue);
+        const ifFalse = this.compile(expr.ifFalse);
+        const condition = this.compile(expr.condition);
+        return `
+            {
+                ${ifTrue}
+                ${ifFalse}
+                ${condition}
+                ${callback}
+                const cond = frame.pop();
+                const ifFalse = frame.pop();
+                const ifTrue = frame.pop();
+                const result = cond ? ifTrue : ifFalse;
+                frame.push(result);
+            }
+        `;
     }
 
     _compileDrop(expr) {
-        const valueExpr = this.compile(expr.value);
-        return async (frame) => {
-            await valueExpr(frame);
+        const callback = this.callback(expr);
+        const value = this.compile(expr.value);
+        return `
+            ${value}
+            ${callback}
             frame.pop();
-        };
+        `;
     }
 
     _compileMemorySize(expr) {
-        return async (frame) => {
-            const pages = this.instance._memory.buffer.length / 65536;
-            frame.push(pages);
-        };
+        const callback = this.callback(expr);
+        const memory = this.enclose(this.instance._memory);
+        return `
+            ${callback}
+            frame.push(${memory}.buffer.length / 65536);
+        `;
     }
 
     _compileMemoryGrow(expr) {
-        const deltaExpr = this.compile(expr.delta);
-        return async (frame) => {
-            await deltaExpr();
-            const delta = frame.pop();
-            const result = this.instance._memory.grow(delta);
-            frame.push(result);
-        };
+        const callback = this.callback(expr);
+        const memory = this.enclose(this.instance._memory);
+        const delta = this.compile(expr.delta);
+        return `
+            {
+                ${callback}
+                ${delta}
+                const delta = frame.pop();
+                const result = ${memory}.grow(delta);
+                frame.push(result);
+            }
+        `;
     }
 
     _compileReturn(expr) {
-        const valueExpr = expr.value ? this.compile(expr.value) : null;
-        return async (frame) => {
-            if (valueExpr) {
-                await valueExpr(frame);
-            }
-            frame.escape(ReturnLabel);
-        };
+        const callback = this.callback(expr);
+        if (expr.value) {
+            const value = this.compile(expr.value);
+            return `
+                ${value}
+                ${callback}
+                return frame.pop();
+            `;
+        } else {
+            return `
+                ${callback}
+                return;
+            `;
+        }
     }
 
     _compileNop(expr) {
-        return async (frame) => {
-            // do nothing
-        };
+        const callback = this.callback(expr);
+        return `${callback}`;
     }
 
     _compileUnreachable(expr) {
-        return async (frame) => {
-            throw new WebAssembly.RuntimeError("Unreachable code");
-        };
+        const callback = this.callback(expr);
+        return `
+            ${callback}
+            throw new WebAssembly.RuntimeError("Unreachable");
+        `;
     }
 }
 
