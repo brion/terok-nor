@@ -770,8 +770,75 @@ class Compiler {
         `;
     }
 
+    binaryOp(op) {
+        switch (op) {
+            case b.AddInt32:
+                return `left + right | 0`;
+            case b.AddFloat64:
+                return `left + right`;
+            case b.SubInt32:
+                return `left - right | 0`;
+            case b.SubFloat64:
+                return `left - right`;
+            case b.MulInt32:
+                return `Math.imul(left, right)`;
+            case b.MulFloat64:
+                return `left * right`;
+            case b.DivFloat64:
+                return `left / right`;
+            case b.AndInt32:
+                return `left & right`;
+            case b.OrInt32:
+                return `left | right`;
+            case b.XorInt32:
+                return `left ^ right`;
+            case b.ShlInt32:
+                return `left << right`;
+            case b.ShrSInt32:
+                return `left >> right`;
+            case b.ShrUInt32:
+                return `(left >>> right) | 0`;
+            case b.EqInt32:
+                return `left === right`;
+            case b.LtSInt32:
+                return `left < right`;
+            case b.LtUInt32:
+                return `(left >>> 0) < (right >>> 0)`;
+            case b.LtFloat32:
+                return `left < right`;
+            case b.LtFloat64:
+                return `left < right`;
+            case b.LeSInt32:
+                return `left <= right`;
+            case b.LeUInt32:
+                return `(left >>> 0) <= (right >>> 0)`;
+            case b.LeFloat32:
+                return `left <= right`;
+            case b.LeFloat64:
+                return `left <= right`;
+            case b.GtSInt32:
+                return `left > right`;
+            case b.GtUInt32:
+                return `(left >>> 0) > (right >>> 0)`;
+            case b.GtFloat32:
+                return `left > right`;
+            case b.GtFloat64:
+                return `left > right`;
+            case b.GeSInt32:
+                return `left >= right`;
+            case b.GeUInt32:
+                return `(left >>> 0) >= (right >>> 0)`;
+            case b.GeFloat32:
+                return `left >= right`;
+            case b.GeFloat64:
+                return `left >= right`;
+            default:
+                const func = this.enclose(this.instance._ops.binary[op]);
+                return `${func}(left, right)`;
+        }
+    }
+
     _compileBinary(expr) {
-        const func = this.enclose(this.instance._ops.binary[expr.op]);
         return `
             ${this.compile(expr.left)}
             ${this.compile(expr.right)}
@@ -779,7 +846,7 @@ class Compiler {
             {
                 const right = ${this.pop()};
                 const left = ${this.pop()};
-                ${this.push(`${func}(left, right)`)};
+                ${this.push(this.binaryOp(expr.op))}
             }
         `;
     }
