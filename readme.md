@@ -74,21 +74,26 @@ This is a great way to get started, but has several downsides:
 
 If it's worth pursuing this project, a custom JS-based WebAssembly parser would probably be a good investment. The ops module can be built as a dev dependency, so we just need to walk through the module and produce a suitable AST with exactly the information needed for execution and debugging in a format that's efficient to do it with.
 
-With the current in-execution walk of the expression-tree AST, the native JavaScript async stack is used to implement branches and loops. Branches that unwind to another block are implemented as exceptions, which might turn out to be a performance bottleneck. This could be changed to explicit unwinding-state passing if that turns out to be cheaper than the exception handling.
+Each function is compiled via JavaScript source into an async function which maintains VM state for the frame (locals, stack, and a pointer to the AST node). The native JavaScript async stack is used to implement branches and loops; most other opcodes call into a stub WebAssembly module per opcode, popping input from and pushing output to the virtual stack.
 
-Single-stepping will require adding a per-opcode async callback point, which could call a user-level callback which delays further execution based on a debugger's pause state.
+Single-stepping is possible by specifying a callback as an async function, and simply not returning until you're done. Each input opcode invokes the callback if it's provided, with the current execution frame and a pointer to the AST node. Set the function on `instance.callback`, and set back to null to disable.
 
 Clean APIs for debugging introspection have not yet been devised. All APIs are to be considered unstable.
+
+# Limitations
+
+No shared memory or SIMD or other non-MVP features are supported yet.
+
+Floating point types may not preserve NaN bit patterns due to JavaScript's canonicalizations, so code using NaN-boxing or other fancy techniques will have trouble.
+
+Eval permissions are required to create new code with the Function constructor. If it's required to deploy in an environment with eval disabled, something would have to be rigged up to provide the JS source separately (server-side compilation) and fill it with the appropriate closure state at runtime.
 
 # Alternatives considered
 
 A more state-machine-esque interpreter design that had a single-step call was considered, but has a number of difficulties:
 * it's a pain to implement block stacks that the JS compiler can already do for me in async functions
 * since call opcodes can be to imported async functions, you'd have to model step as an async function or Promise anyway
-
-# Potential optimizations
-
-Speed optimizations for non-single-step running could involve packing more rows of non-call instructions together in runs which can be individually compiled as Wasm subfunctions. But this might be a lot of trouble and not worth it.
+* it's so slow when not actively debugging
 
 # License
 
