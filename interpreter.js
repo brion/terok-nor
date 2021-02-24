@@ -651,30 +651,31 @@ class Compiler {
     _compileCall(expr) {
         const func = this.enclose(this.instance._funcs[expr.target]);
         const hasResult = (expr.type !== b.none);
+        let args, result;
         return `
             ${this.compileMultiple(expr.operands)}
             ${this.callback(expr)}
-            {
-                const args = ${this.popMultiple(expr.operands.length)});
-                const result = await ${func}(...args);
-                ${hasResult ? this.push(`result`) : ``}
+            ${
+                args = this.popMultiple(expr.operands.length),
+                result = `await ${func}(...${args})`,
+                hasResult ? this.push(result) : result
             }
         `;
     }
 
     _compileCallIndirect(expr) {
         const hasResult = (expr.type !== b.none);
+        let args, index, result;
         return `
             ${this.compile(expr.target)}
             ${this.compileMultiple(expr.operands)}
             ${this.callback(expr)}
-            {
-                const args = ${this.popMultiple(expr.operands.length)};
-                const index = ${this.pop()};
-                const func = table.get(index);
+            ${
+                args = this.popMultiple(expr.operands.length),
+                index = this.pop(),
                 // @todo enforce signature matches
-                const result = await func(...args);
-                ${hasResult ? this.push(`result`) : ``}
+                result = `await (table.get(${index}))(...${args})`,
+                hasResult ? this.push(result) : result
             }
         `;
     }
@@ -691,11 +692,7 @@ class Compiler {
             return `
                 ${this.compile(expr.value)}
                 ${this.callback(expr)}
-                {
-                    const value = ${this.pop()};
-                    locals[${expr.index}] = value;
-                    ${this.push(`value`)}
-                }
+                ${this.push(`locals[${expr.index}] = ${this.pop()}`)}
             `;
         } else {
             return `
@@ -735,14 +732,15 @@ class Compiler {
     _compileStore(expr) {
         const valueInfo = b.getExpressionInfo(expr.value);
         const func = this.enclose(this.instance._ops.memory.store[valueInfo.type][expr.bytes << 3]);
+        let value, ptr;
         return `
             ${this.compile(expr.ptr)}
             ${this.compile(expr.value)}
             ${this.callback(expr)}
-            {
-                const value = ${this.pop()};
-                const ptr = ${this.pop()} + ${expr.offset};
-                ${func}(ptr, value);
+            ${
+                value = this.pop(),
+                ptr = this.pop(),
+                `${func}(${ptr} + ${expr.offset}, ${value})`
             }
         `;
     }
@@ -761,16 +759,14 @@ class Compiler {
         `;
     }
     
-    unaryOp(op) {
+    unaryOp(op, operand) {
         switch (op) {
         case b.NegFloat32:
         case b.NegFloat64:
-            return `-operand`;
-        case b.PromoteFloat32:
-            return `operand`;
+            return `-${operand}`;
         default:
             const func = this.enclose(this.instance._ops.binary[op]);
-            return `${func}(operand)`;
+            return `${func}(${operand})`;
         }
     }
 
@@ -778,101 +774,100 @@ class Compiler {
         return `
             ${this.compile(expr.value)}
             ${this.callback(expr)}
-            {
-                const operand = ${this.pop()};
-                ${this.push(this.unaryOp(expr.op))}
-            }
+            ${this.push(this.unaryOp(expr.op, this.pop()))}
         `;
     }
 
-    binaryOp(op) {
+    binaryOp(op, left, right) {
         switch (op) {
             case b.AddInt32:
-                return `left + right | 0`;
+                return `${left} + ${right} | 0`;
             case b.AddFloat64:
-                return `left + right`;
+                return `${left} + ${right}`;
             case b.SubInt32:
-                return `left - right | 0`;
+                return `${left} - ${right} | 0`;
             case b.SubFloat64:
-                return `left - right`;
+                return `${left} - ${right}`;
             case b.MulInt32:
-                return `Math.imul(left, right)`;
+                return `Math.imul(${left}, ${right})`;
             case b.MulFloat64:
-                return `left * right`;
+                return `${left} * ${right}`;
             case b.DivFloat64:
-                return `left / right`;
+                return `${left} / ${right}`;
             case b.AndInt32:
-                return `left & right`;
+                return `${left} & ${right}`;
             case b.OrInt32:
-                return `left | right`;
+                return `${left} | ${right}`;
             case b.XorInt32:
-                return `left ^ right`;
+                return `${left} ^ ${right}`;
             case b.ShlInt32:
-                return `left << right`;
+                return `${left} << ${right}`;
             case b.ShrSInt32:
-                return `left >> right`;
+                return `${left} >> ${right}`;
             case b.ShrUInt32:
-                return `(left >>> right) | 0`;
+                return `(${left} >>> ${right}) | 0`;
             case b.EqInt32:
-                return `left === right`;
+                return `${left} === ${right}`;
             case b.LtSInt32:
-                return `left < right`;
+                return `${left} < ${right}`;
             case b.LtUInt32:
-                return `(left >>> 0) < (right >>> 0)`;
+                return `(${left} >>> 0) < (${right} >>> 0)`;
             case b.LtFloat32:
             case b.LtFloat64:
-                return `left < right`;
+                return `${left} < ${right}`;
             case b.LeSInt32:
-                return `left <= right`;
+                return `${left} <= ${right}`;
             case b.LeUInt32:
-                return `(left >>> 0) <= (right >>> 0)`;
+                return `(${left} >>> 0) <= (${right} >>> 0)`;
             case b.LeFloat32:
             case b.LeFloat64:
-                return `left <= right`;
+                return `${left} <= ${right}`;
             case b.GtSInt32:
-                return `left > right`;
+                return `${left} > ${right}`;
             case b.GtUInt32:
-                return `(left >>> 0) > (right >>> 0)`;
+                return `(${left} >>> 0) > (${right} >>> 0)`;
             case b.GtFloat32:
             case b.GtFloat64:
-                return `left > right`;
+                return `${left} > ${right}`;
             case b.GeSInt32:
-                return `left >= right`;
+                return `${left} >= ${right}`;
             case b.GeUInt32:
-                return `(left >>> 0) >= (right >>> 0)`;
+                return `(${left} >>> 0) >= (${right} >>> 0)`;
             case b.GeFloat32:
             case b.GeFloat64:
-                return `left >= right`;
+                return `${left} >= ${right}`;
             default:
                 const func = this.enclose(this.instance._ops.binary[op]);
-                return `${func}(left, right)`;
+                return `${func}(${left}, ${right})`;
         }
     }
 
     _compileBinary(expr) {
+        let left, right;
         return `
             ${this.compile(expr.left)}
             ${this.compile(expr.right)}
             ${this.callback(expr)}
-            {
-                const right = ${this.pop()};
-                const left = ${this.pop()};
-                ${this.push(this.binaryOp(expr.op))}
+            ${
+                right = this.pop(), 
+                left = this.pop(),
+                this.push(this.binaryOp(expr.op, left, right))
             }
         `;
     }
 
     _compileSelect(expr) {
+        let ifTrue, ifFalse, cond;
         return `
             ${this.compile(expr.ifTrue)}
             ${this.compile(expr.ifFalse)}
             ${this.compile(expr.condition)}
             ${this.callback(expr)}
-            {
-                const cond = ${this.pop()};
-                const ifFalse = ${this.pop()};
-                const ifTrue = ${this.pop()};
-                ${this.push(`cond ? ifTrue : ifFalse`)}
+            ${
+                cond = this.pop(),
+                ifFalse = this.pop(),
+                ifTrue = this.pop(),
+                this.push(`${cond} ? ${ifTrue} : ${ifFalse}`)
             }
         `;
     }
@@ -898,11 +893,7 @@ class Compiler {
         return `
             ${this.compile(expr.delta)}
             ${this.callback(expr)}
-            {
-                const delta = ${this.pop()};
-                const result = ${memory}.grow(delta);
-                ${this.push(`result`)}
-            }
+            ${this.push(`${memory}.grow(${this.pop()})`)}
         `;
     }
 
