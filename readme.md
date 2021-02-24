@@ -43,10 +43,29 @@ const {Interpreter} = require('terok-nor');
     const interp = await Interpreter.instantiate(wasm, imports);
     await interp.instance.exports.do_stuff();
 
+    // Again, but with a debug hook
+    function delay(ms) {
+        return new Promise((resolve, reject) => {
+            setTimeout(resolve, ms);
+        });
+    }
+    interp.instance.callback = async (frame, node) => {
+        // You can arbitrarily pause or delay execution.
+        // This slows execution to one opcode per 50ms!
+        await delay(50);
+
+        // Stack and locals are dumped for your introspection pleasure.
+        // This causes some slowdown so for best speed when not needing
+        // a hook set it back to null.
+        console.log('stack', frame.stack);
+        console.log('locals', frame.locals);
+
+        // API for the source node is not yet complete.
+        console.log('AST node', node);
+    };
+    await interp.instance.exports.do_stuff();
 })();
 ```
-
-There is not yet a hook API for debugging or single-stepping, but this is planned, with an optional `async` callback before every opcode evaluation and introspection to VM state.
 
 # Goals and non-goals
 
@@ -58,6 +77,7 @@ Goals:
 * debugging hooks allowing for disassembly, single-step, stack trace, locals, and memory
 * debugging hooks allowing for source-level debugging with DWARF data
 * runtime should be relatively lightweight, but not at the expense of functionality
+* reasonably fast given the constraints
 
 Non-goals:
 * not intended to be extremely fast
@@ -88,6 +108,8 @@ Floating point types may not preserve NaN bit patterns due to JavaScript's canon
 
 Eval permissions are required to create new code with the Function constructor. If it's required to deploy in an environment with eval disabled, something would have to be rigged up to provide the JS source separately (server-side compilation) and fill it with the appropriate closure state at runtime.
 
+Nothing is hardened against re-entrancy; if you call into a second function while another one is running and in progress it might work, or it might cause problems.
+
 # Debugger plans
 
 Need to think about general plans for supporting source-level and assembly-level debugging, which is desirable when connecting to native server-side processes as well.
@@ -100,6 +122,8 @@ A more state-machine-esque interpreter design that had a single-step call was co
 * it's a pain to implement block stacks that the JS compiler can already do for me in async functions
 * since call opcodes can be to imported async functions, you'd have to model step as an async function or Promise anyway
 * it's so slow when not actively debugging
+
+A chain of async function closures implemented around each opcode was also tried; this worked well but had too much function call overhead in the hot path when not debugging. Moving to JS compilation and moving stack and locals inside the function improved runtime performance by about 20x on the Mandelbrot iterator demo.
 
 # License
 
