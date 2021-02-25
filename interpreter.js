@@ -500,9 +500,9 @@ class Compiler {
                         `;
                     }).join('\n')
                 }
-                function spillLocals() {
+                frame.spillLocals = () => {
                     return [${compiler.localVars().join(`, `)}];
-                }
+                };
                 ${body}
                 ${hasResult ? `return ${compiler.pop()};` : ``}
             };
@@ -569,7 +569,6 @@ class Compiler {
         const node = this.enclose(expr);
         return `if (instance.callback) {
             frame.spillStack = spillStack${this.stack.length};
-            frame.spillLocals = spillLocals;
             frame.node = ${node};
             await instance.callback(frame);
         }`;
