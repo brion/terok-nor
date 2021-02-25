@@ -55,8 +55,8 @@ const imports = {
             }, ms);
         });
     }
-    interp.instance.callback = async(node) => {
-        await delay(50);
+    interp.instance.callback = async (frame, node) => {
+        //await delay(1);
     };
     */
     await test(interp.instance);

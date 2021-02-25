@@ -439,6 +439,12 @@ class Frame {
     }
 }
 
+function* range(end) {
+    for (let i = 0; i < end; i++) {
+        yield i;
+    }
+}
+
 class Compiler {
     constructor(instance, params=[], vars=[]) {
         this.instance = instance;
@@ -473,6 +479,15 @@ class Compiler {
                     compiler.localDefaults.length
                     ? `let ${compiler.localInits(paramNames).join(`, `)};`
                     : ``
+                }
+                ${
+                    Array.from(range(compiler.maxDepth + 1), (_, depth) => {
+                        return `
+                            function spillStack${depth}() {
+                                return [${compiler.stackVars(depth).join(`, `)}];
+                            }
+                        `;
+                    }).join('\n')
                 }
                 function spillLocals() {
                     return [${compiler.localVars().join(`, `)}];
@@ -542,7 +557,7 @@ class Compiler {
     callback(expr) {
         const node = this.enclose(expr);
         return `if (instance.callback) {
-            frame.stack = [${this.stackVars(this.stack.length).join(`, `)}];
+            frame.stack = spillStack${this.stack.length}();
             frame.locals = spillLocals();
             await instance.callback(frame, ${node});
         }`;
