@@ -55,8 +55,15 @@ const imports = {
             }, ms);
         });
     }
-    interp.instance.callback = async (frame, node) => {
+    */
+    /*
+    interp.instance.callback = async (frame) => {
         //await delay(1);
+        console.log({
+            node: frame.node,
+            stack: frame.stack,
+            locals: frame.locals
+        });
     };
     */
     await test(interp.instance);

@@ -559,16 +559,13 @@ class Compiler {
         return `if (instance.callback) {
             frame.stack = spillStack${this.stack.length}();
             frame.locals = spillLocals();
-            await instance.callback(frame, ${node});
+            frame.node = ${node};
+            await instance.callback(frame);
         }`;
     }
 
     vars(base, max) {
-        const vars = new Array(max);
-        for (let i = 0; i < max; i++) {
-            vars[i] = `${base}${i}`;
-        }
-        return vars;
+        return Array.from(range(max), (_, i) => `${base}${i}`);
     }
 
     stackVars(max) {

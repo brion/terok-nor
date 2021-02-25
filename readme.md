@@ -49,7 +49,7 @@ const {Interpreter} = require('terok-nor');
             setTimeout(resolve, ms);
         });
     }
-    interp.instance.callback = async (frame, node) => {
+    interp.instance.callback = async (frame) => {
         // You can arbitrarily pause or delay execution.
         // This slows execution to one opcode per 50ms!
         await delay(50);
@@ -61,7 +61,7 @@ const {Interpreter} = require('terok-nor');
         console.log('locals', frame.locals);
 
         // API for the source node is not yet complete.
-        console.log('AST node', node);
+        console.log('AST node', frame.node);
     };
     await interp.instance.exports.do_stuff();
 })();
@@ -96,7 +96,7 @@ If it's worth pursuing this project, a custom JS-based WebAssembly parser would 
 
 Each function is compiled via JavaScript source into an async function which maintains VM state for the frame (locals, stack, and a pointer to the AST node). JavaScript control structures are used to implement blocks, branches and loops; most other opcodes call into a stub WebAssembly module per opcode, while a few are implemented directly in JavaScript where the semantics are clear. The stack is kept virtually in local variables, as are the Wasm locals; when a debug callback is attached they are spilled into arrays for introspection.
 
-Single-stepping is possible by specifying a callback as an async function, and simply not returning until you're done. Each input opcode invokes the callback if it's provided, with the current execution frame and a pointer to the AST node. Set the function on `instance.callback`, and set back to null to disable.
+Single-stepping is possible by specifying a callback as an async function, and simply not returning until you're done. Each input opcode invokes the callback if it's provided, with the current execution frame state. Set the function on `instance.callback`, and set back to null to disable.
 
 Clean APIs for debugging introspection have not yet been devised. All APIs are to be considered unstable.
 
