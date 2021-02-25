@@ -43,9 +43,10 @@ const {Interpreter} = require('terok-nor');
     const interp = await Interpreter.instantiate(wasm, imports);
     await interp.instance.exports.do_stuff();
 
+
     // Again, but with a debug hook
-    function delay(ms) {
-        return new Promise((resolve, reject) => {
+    async function delay(ms) {
+        await new Promise((resolve, reject) => {
             setTimeout(resolve, ms);
         });
     }
@@ -53,15 +54,58 @@ const {Interpreter} = require('terok-nor');
         // You can arbitrarily pause or delay execution.
         // This slows execution to one opcode per 50ms!
         await delay(50);
+    };
+    await interp.instance.exports.do_stuff();
 
-        // Stack and locals are dumped for your introspection pleasure.
-        // This causes some slowdown so for best speed when not needing
-        // a hook set it back to null.
-        console.log('stack', frame.stack);
-        console.log('locals', frame.locals);
 
-        // API for the source node is not yet complete.
-        console.log('AST node', frame.node);
+    // You could use this to implement breakpoints
+    class DebugAbort extends Error {
+        constructor() {
+            super("Debug abort");
+        }
+    }
+    const breakpoints = new Set();
+    const continueButton = document.querySelector('#debug-continue');
+    const abortButton = document.querySelector('#debug-abort');
+    function abortHandler() {
+        continueButton.disabled = true;
+        continueButton.click = null;
+        abortButton.disabled = true;
+        abortButton.click = null;
+        interp.instance.callback = async (frame) => {
+            throw new DebugAbort();
+        };
+    }
+    abortButton.click = abortHandler;
+    continueButton.disabled = true;
+    interp.instance.callback = async (frame) => {
+        // A Set of source nodes (APIs not yet complete) could be compared
+        // for implementation of breakpoints at a lower cost than full
+        // debug funsies
+        if (breakpoints.has(frame.node)) {
+            await new Promise((resolve, reject) => {
+                continueButton.click = () => {
+                    continueButton.disabled = true;
+                    continueButton.click = null;
+                    resolve();
+                };
+                continueButton.disabled = false;
+
+                abortButton.click = () => {
+                    abortHandler();
+                    reject(new DebugAbort());
+                };
+
+                // Stack and locals are dumped for your introspection pleasure.
+                // This causes some slowdown, as the array is constructed on demand.
+                // If you do not use them, the performance cost is lower.
+                console.log('stack', frame.stack);
+                console.log('locals', frame.locals);
+
+                // API for the source node is not yet complete.
+                console.log('AST node', frame.node);
+            });
+        }
     };
     await interp.instance.exports.do_stuff();
 })();

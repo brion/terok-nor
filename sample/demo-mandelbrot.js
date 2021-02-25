@@ -66,6 +66,7 @@ const imports = {
         });
     };
     */
+    //interp.instance.callback = async (frame) => {};
     await test(interp.instance);
 
     console.log('done.');

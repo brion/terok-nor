@@ -434,8 +434,19 @@ function expressionMap(id) {
 class Frame {
     constructor(instance) {
         this.instance = instance;
-        this.locals = null;
-        this.stack = null;
+        this._stack = null;
+        this._locals = null;
+        this.spillStack = null;
+        this.spillLocals = null;
+        this.node = null;
+    }
+
+    get stack() {
+        return this.spillStack();
+    }
+
+    get locals() {
+        return this.spillLocals();
     }
 }
 
@@ -557,8 +568,8 @@ class Compiler {
     callback(expr) {
         const node = this.enclose(expr);
         return `if (instance.callback) {
-            frame.stack = spillStack${this.stack.length}();
-            frame.locals = spillLocals();
+            frame.spillStack = spillStack${this.stack.length};
+            frame.spillLocals = spillLocals;
             frame.node = ${node};
             await instance.callback(frame);
         }`;
