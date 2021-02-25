@@ -565,13 +565,19 @@ class Compiler {
         return 'label' + index;
     }
 
-    callback(expr) {
+    callback(expr, fallible=false) {
         const node = this.enclose(expr);
-        return `if (instance.callback) {
+        const spill = `
             frame.spillStack = spillStack${this.stack.length};
             frame.node = ${node};
-            await instance.callback(frame);
-        }`;
+        `;
+        return `
+            ${fallible ? spill : ``}
+            if (instance.callback) {
+                ${fallible ? `` : spill}
+                await instance.callback(frame);
+            }
+        `;
     }
 
     vars(base, max) {
@@ -742,7 +748,7 @@ class Compiler {
         let args, result;
         return `
             ${this.compileMultiple(expr.operands)}
-            ${this.callback(expr)}
+            ${this.callback(expr, true)}
             ${
                 args = this.popArgs(expr.operands.length),
                 result = `await ${func}(${args})`,
@@ -757,7 +763,7 @@ class Compiler {
         return `
             ${this.compile(expr.target)}
             ${this.compileMultiple(expr.operands)}
-            ${this.callback(expr)}
+            ${this.callback(expr, true)}
             ${
                 args = this.popArgs(expr.operands.length),
                 index = this.pop(),
@@ -814,7 +820,7 @@ class Compiler {
         const func = this.enclose(this.instance._ops.memory.load[expr.type][expr.bytes << 3][expr.isSigned ? 'signed' : 'unsigned']);
         return `
             ${this.compile(expr.ptr)}
-            ${this.callback(expr)}
+            ${this.callback(expr, true)}
             ${this.push(`${func}(${this.pop()} + ${expr.offset})`)}
         `;
     }
@@ -826,7 +832,7 @@ class Compiler {
         return `
             ${this.compile(expr.ptr)}
             ${this.compile(expr.value)}
-            ${this.callback(expr)}
+            ${this.callback(expr, true)}
             ${
                 value = this.pop(),
                 ptr = this.pop(),
@@ -930,12 +936,24 @@ class Compiler {
         }
     }
 
+    binaryFallible(op) {
+        switch (op) {
+            case b.DivSInt32:
+            case b.DivSInt64:
+            case b.DivFloat32:
+            case b.DivFloat64:
+                return true;
+            default:
+                return false;
+        }
+    }
+
     _compileBinary(expr) {
         let left, right;
         return `
             ${this.compile(expr.left)}
             ${this.compile(expr.right)}
-            ${this.callback(expr)}
+            ${this.callback(expr, this.binaryFallible(expr.op))}
             ${
                 right = this.pop(), 
                 left = this.pop(),
@@ -980,7 +998,7 @@ class Compiler {
         const memory = this.enclose(this.instance._memory);
         return `
             ${this.compile(expr.delta)}
-            ${this.callback(expr)}
+            ${this.callback(expr, true)}
             ${this.push(`${memory}.grow(${this.pop()})`)}
         `;
     }
@@ -1006,7 +1024,7 @@ class Compiler {
 
     _compileUnreachable(expr) {
         return `
-            ${this.callback(expr)}
+            ${this.callback(expr, true)}
             throw new WebAssembly.RuntimeError("Unreachable");
         `;
     }
