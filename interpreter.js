@@ -120,6 +120,8 @@ class Instance {
 
         this._ops = null;
 
+        this._stackTracers = [];
+
         this.isReady = false;
         this.ready = b.ready.then(async () => {
             const mod = this._mod;
@@ -284,6 +286,12 @@ class Instance {
         });
     }
 
+    /// Generate a full stack trace, dumping stacks and locals from
+    /// the internal state of each function on the call stack.
+    /// These are Frame objects.
+    stackTrace() {
+        return this._stackTracers.map((dump) => dump());
+    }
 }
 
 /// Parse a module from binary form and prepare it to be instantiated later.
@@ -424,13 +432,15 @@ function expressionMap(id) {
     return expressions[id];
 }
 
+/// Exceptions thrown from inside the interpreter save their stack frames
+/// in an array on this symbol property.
+const interpreterStackTrace = Symbol('interpreterStackTrace');
 
-/// Execution state frame for a single function
+/// Dumped execution state frame for a single function.
 ///
-/// Will run asynchronously, but is *not* safe for re-entrant calls
-/// during a single execution run.
-///
-/// Not meant to be exposed externally.
+/// Returned with stack traces from `Interpreter.prototype.stackTrace`
+/// or through the `[interpreterStackTrace]` symbol property on exceptions
+/// thrown via interpreter calls.
 class Frame {
     constructor(instance) {
         this.instance = instance;
@@ -446,10 +456,6 @@ function* range(end) {
     }
 }
 
-/// Exceptions thrown from inside the interpreter save their stack frames
-/// in an array on this symbol property.
-const interpreterStackTrace = Symbol('interpreterStackTrace');
-
 class Compiler {
     constructor(instance, params=[], vars=[]) {
         this.instance = instance;
@@ -463,7 +469,7 @@ class Compiler {
         this.maxDepth = 0;
     }
 
-    static compileBase(instance, expr, params, results, vars) {
+    static compileBase(instance, expr, params, results, vars, name='<anonymous>') {
         const compiler = new Compiler(instance, params, vars);
         const inst = compiler.enclose(instance);
         const frame = compiler.enclose(Frame);
@@ -475,7 +481,7 @@ class Compiler {
             return async (${paramNames.join(', ')}) => {
                 const instance = ${inst};
                 const table = instance.table;
-                const frame = new ${frame}(instance);
+                const frame = new ${frame}(instance, ${compiler.literal(name)});
                 ${
                     compiler.maxDepth
                     ? `let ${compiler.stackVars(compiler.maxDepth).join(`, `)};`
@@ -495,21 +501,28 @@ class Compiler {
                         `;
                     }).join(',\n')
                 }];
-                let spill = null;
+                let spill;
+                const dump = () => {
+                    spillers[spill.depth]();
+                    frame.locals = [${compiler.localVars().join(`, `)}];
+                    frame.node = spill.node;
+                    return frame;
+                }
+                let interrupt;
                 try {
+                    instance._stackTracers.push(dump);
                     ${body}
                     ${hasResult ? `return ${compiler.pop()};` : ``}
                 } catch (e) {
                     if (spill) {
-                        frame.node = spill.node;
-                        frame.locals = [${compiler.localVars().join(`, `)}];
-                        spillers[spill.depth]();
                         if (e[${stackKey}]) {
-                            e[${stackKey}].push(frame);
+                            e[${stackKey}].push(dump);
                         } else {
-                            e[${stackKey}] = [frame];
+                            e[${stackKey}] = [dump];
                         }
                     }
+                } finally {
+                    instance._stackTracers.pop();
                 }
             };
         `;
@@ -521,7 +534,7 @@ class Compiler {
     }
 
     static compileFunction(instance, func) {
-        return Compiler.compileBase(instance, func.body, b.expandType(func.params), func.results, func.vars)
+        return Compiler.compileBase(instance, func.body, b.expandType(func.params), func.results, func.vars, func.name)
     }
 
     static compileExpression(instance, expr) {
