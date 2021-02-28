@@ -790,13 +790,15 @@ class Compiler {
         // that may not have a huge benefit
         return `
             ${this.compileMultiple(expr.operands)}
-            ${this.fallible(expr,
-                args = this.popArgs(expr.operands.length),
-                call = `await ${func}(${args})`,
-                hasResult
-                    ? this.push(call)
-                    : `${call};`
-            )}
+            ${this.fallible(expr, `
+                ${
+                    args = this.popArgs(expr.operands.length),
+                    call = `await ${func}(${args})`,
+                    hasResult
+                        ? this.push(call)
+                        : `${call};`
+                }
+            `)}
         `;
     }
 
