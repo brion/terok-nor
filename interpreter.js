@@ -523,26 +523,24 @@ function uninterruptible(expr) {
     const info = (typeof expr === 'object') ? expr : b.getExpressionInfo(expr);
     switch (info.id) {
         case b.BlockId:
-            // Note: we can model block sequences specially too, perhaps.
-            //return info.children.filter(uninterruptible).length == info.children.length;
+            // Note block children are *not* like inputs!
+            // We need to transit them because they happen inside our node's output.
             return false;
+            return info.children.filter(uninterruptible).length == info.children.length;
         case b.IfId:
-            //return uninterruptible(info.condition) &&
-            //    uninterruptible(info.ifTrue) &&
-            //    (!info.ifFalse || uninterruptible(info.true))
-            return false;
+            return uninterruptible(info.ifTrue) &&
+                (!info.ifFalse || uninterruptible(info.true))
         case b.LoopId:
-            //return uninterruptible(info.body);
-            return false;
+            return uninterruptible(info.body);
         case b.BreakId:
-            return !info.condition || uninterruptible(info.condition);
+            return true;
         case b.SwitchId:
-            return uninterruptible(info.condition);
+            return true;
         case b.CallId:
             // @todo analyze all statically linked internal functions
             // and pass through a true if possible
-        case b.CallIndirectId:
             return false;
+        case b.CallIndirectId:
         case b.LocalGetId:
         case b.LocalSetId:
         case b.GlobalGetId:
@@ -550,16 +548,9 @@ function uninterruptible(expr) {
         case b.LoadId:
         case b.StoreId:
         case b.ConstId:
-            return true;
         case b.UnaryId:
-            return uninterruptible(info.value);
         case b.BinaryId:
-            return uninterruptible(info.left) &&
-                uninterruptible(info.right);
         case b.SelectId:
-            return uninterruptible(info.ifTrue) &&
-                uninterruptible(info.ifFalse) &&
-                uninterruptible(info.condition);
         case b.DropId:
         case b.ReturnId:
         case b.MemorySizeId:
