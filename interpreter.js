@@ -434,19 +434,9 @@ function expressionMap(id) {
 class Frame {
     constructor(instance) {
         this.instance = instance;
-        this._stack = null;
-        this._locals = null;
-        this.spillStack = null;
-        this.spillLocals = null;
         this.node = null;
-    }
-
-    get stack() {
-        return this.spillStack();
-    }
-
-    get locals() {
-        return this.spillLocals();
+        this.stack = null;
+        this.locals = null;
     }
 }
 
@@ -455,6 +445,10 @@ function* range(end) {
         yield i;
     }
 }
+
+/// Exceptions thrown from inside the interpreter save their stack frames
+/// in an array on this symbol property.
+const interpreterStackTrace = Symbol('interpreterStackTrace');
 
 class Compiler {
     constructor(instance, params=[], vars=[]) {
@@ -476,6 +470,7 @@ class Compiler {
         const paramNames = params.map((_type, index) => `param${index}`);
         const body = compiler.compile(expr);
         const hasResult = (results !== b.none);
+        const stackKey = compiler.enclose(interpreterStackTrace);
         const func = `
             return async (${paramNames.join(', ')}) => {
                 const instance = ${inst};
@@ -491,20 +486,31 @@ class Compiler {
                     ? `let ${compiler.localInits(paramNames).join(`, `)};`
                     : ``
                 }
-                ${
+                const spillers = [${
                     Array.from(range(compiler.maxDepth + 1), (_, depth) => {
                         return `
-                            function spillStack${depth}() {
-                                return [${compiler.stackVars(depth).join(`, `)}];
+                            (state) => {
+                                frame.stack = [${compiler.stackVars(depth).join(`, `)}];
                             }
                         `;
-                    }).join('\n')
+                    }).join(',\n')
+                }];
+                let spill = null;
+                try {
+                    ${body}
+                    ${hasResult ? `return ${compiler.pop()};` : ``}
+                } catch (e) {
+                    if (spill) {
+                        frame.node = spill.node;
+                        frame.locals = [${compiler.localVars().join(`, `)}];
+                        spillers[spill.depth](spill);
+                        if (e[${stackKey}]) {
+                            e[${stackKey}].push(frame);
+                        } else {
+                            e[${stackKey}] = [frame];
+                        }
+                    }
                 }
-                frame.spillLocals = () => {
-                    return [${compiler.localVars().join(`, `)}];
-                };
-                ${body}
-                ${hasResult ? `return ${compiler.pop()};` : ``}
             };
         `;
         const closureNames = compiler.closure.map((_val, index) => `closure${index}`);
@@ -566,10 +572,11 @@ class Compiler {
     }
 
     callback(expr, fallible=false) {
-        const node = this.enclose(expr);
         const spill = `
-            frame.spillStack = spillStack${this.stack.length};
-            frame.node = ${node};
+            spill = ${this.enclose({
+                node: expr,
+                depth: this.stack.length
+            })};
         `;
         return `
             ${fallible ? spill : ``}
@@ -1300,6 +1307,7 @@ const Interpreter = {
     compileStreaming,
     instantiate,
     instantiateStreaming,
+    interpreterStackTrace,
     isReady: false,
 };
 
