@@ -218,7 +218,6 @@ class Instance {
                                 }
                             };
                         `;
-                        //console.log(code);
                         thunk = (new Function('imported', code))(imported);
                     } else {
                         throw new RangeError("Expected function for import");
@@ -646,7 +645,7 @@ class Compiler {
         const closureNames = compiler.closure.map((_val, index) => `closure${index}`);
         const args = closureNames.concat([func]);
         //console.log({closureNames, closure: compiler.closure})
-        //console.log(func);
+        console.log(func);
         return Reflect.construct(Function, args).apply(null, compiler.closure);
     }
 

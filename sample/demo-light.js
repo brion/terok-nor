@@ -40,6 +40,16 @@ const imports = {
     const interp = await Interpreter.instantiate(wasm, imports);
     await test(interp.instance);
 
+    console.log('Debuggable async execution:');
+    const debug = await Interpreter.instantiate(wasm, imports, {
+        debug: true
+    });
+    await test(debug.instance);
+
+    console.log('Debuggable async execution with a hook:');
+    debug.instance.callback = async (frame) => {};
+    await test(debug.instance);
+
     console.log('done.');
 
 })();

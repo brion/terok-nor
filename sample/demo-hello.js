@@ -14,13 +14,27 @@ const imports = {
 
 (async () => {
 
+    async function test(instance) {
+        return await instance.exports.hello();
+    }
+
     console.log('Native sync execution:');
     const native = await WebAssembly.instantiate(wasm, imports);
-    native.instance.exports.hello();
+    await test(native.instance);
 
     console.log('Interpreted async execution:');
     const interp = await Interpreter.instantiate(wasm, imports);
-    await interp.instance.exports.hello();
+    await test(interp.instance);
+
+    console.log('Debuggable async execution:');
+    const debug = await Interpreter.instantiate(wasm, imports, {
+        debug: true
+    });
+    await test(debug.instance);
+
+    console.log('Debuggable async execution with a hook:');
+    debug.instance.callback = async (frame) => {};
+    await test(debug.instance);
 
     console.log('done.');
 
