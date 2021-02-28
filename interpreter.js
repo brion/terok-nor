@@ -524,13 +524,16 @@ function uninterruptible(expr) {
     switch (info.id) {
         case b.BlockId:
             // Note: we can model block sequences specially too, perhaps.
-            return info.children.filter(uninterruptible).length == info.children.length;
+            //return info.children.filter(uninterruptible).length == info.children.length;
+            return false;
         case b.IfId:
-            return uninterruptible(info.condition) &&
-                uninterruptible(info.ifTrue) &&
-                (!info.ifFalse || uninterruptible(info.true))
+            //return uninterruptible(info.condition) &&
+            //    uninterruptible(info.ifTrue) &&
+            //    (!info.ifFalse || uninterruptible(info.true))
+            return false;
         case b.LoopId:
-            return uninterruptible(info.body);
+            //return uninterruptible(info.body);
+            return false;
         case b.BreakId:
             return !info.condition || uninterruptible(info.condition);
         case b.SwitchId:
@@ -747,10 +750,18 @@ class Compiler {
         const nodes = args.flatMap((arg) => this.compile(arg));
         const spill = this.spill(expr);
         const stackVars = args.map((_) => this.pop()).reverse();
+        let result;
+        if (expr.type != b.none) {
+            // quick hack for getting the stack variable name
+            // for the value pushed by the opcode
+            this.push();
+            result = this.pop();
+            this.push();
+        }
         nodes.push({
             uninterruptible: uninterruptible(expr),
             infallible: infallible(expr),
-            fragment: builder(...stackVars),
+            fragment: builder(result, ...stackVars),
             spill
         });
 
@@ -794,19 +805,6 @@ class Compiler {
         return `stack${depth - 1}`;
     }
 
-    peek() {
-        const depth = this.stack.length;
-        return `stack${depth - 1}`;
-    }
-
-    popArgs(num) {
-        const items = new Array(num);
-        for (let i = num - 1; i >= 0; i--) {
-            items[i] = this.pop();
-        }
-        return items.join(', ');
-    }
-
     saveStack() {
         return this.stack.length;
     }
@@ -826,7 +824,7 @@ class Compiler {
         let saved;
         if (expr.name !== '') {
             let label;
-            return this.opcode(expr, expr.children, () => `
+            return this.opcode(expr, expr.children, (result) => `
                 {
                     ${(saved = this.saveStack()), ``}
                     ${label = this.label(expr.name)}:
@@ -842,7 +840,7 @@ class Compiler {
     }
 
     _compileIf(expr) {
-        return this.opcode(expr, [expr.condition], (condition) => `
+        return this.opcode(expr, [expr.condition], (result, condition) => `
             if (${condition}) {
                 ${this.flatten(this.compile(expr.ifTrue))}
             }
@@ -858,7 +856,7 @@ class Compiler {
 
     _compileLoop(expr) {
         let outer, inner, saved;
-        return this.opcode(expr, [], () => `
+        return this.opcode(expr, [], (result) => `
             {
                 ${(saved = this.saveStack()), ``}
                 ${outer = this.label(expr.name + '$$loop')}:
@@ -879,7 +877,7 @@ class Compiler {
             break ${this.label(expr.name)};
         `;
         if (expr.condition) {
-            return this.opcode(expr, [expr.condition], (condition) => `
+            return this.opcode(expr, [expr.condition], (result, condition) => `
                 if (${condition}) {
                     ${breaker}
                 }
@@ -891,7 +889,7 @@ class Compiler {
 
     _compileSwitch(expr) {
         const labels = expr.names.map((name) => this.label(name));
-        return this.opcode(expr, [expr.condition], (condition) => `
+        return this.opcode(expr, [expr.condition], (result, condition) => `
             switch (${condition}) {
                 ${labels.map((label, index) => `
                     case ${index}:
@@ -905,23 +903,21 @@ class Compiler {
 
     _compileCall(expr) {
         const func = this.enclose(this.instance._funcs[expr.target]);
-        const hasResult = (expr.type !== b.none);
-        return this.opcode(expr, expr.operands, (...args) => {
+        return this.opcode(expr, expr.operands, (result, ...args) => {
             const call = `await ${func}(${args.join(', ')})`;
-            return hasResult
-                    ? this.push(call)
+            return result
+                    ? `${result} = ${call};`
                     : `${call};`;
         });
     }
 
     _compileCallIndirect(expr) {
-        const hasResult = (expr.type !== b.none);
-        return this.opcode(expr, [expr.target].concat(expr.operands), (target, ...args) => {
+        return this.opcode(expr, [expr.target].concat(expr.operands), (result, target, ...args) => {
             // @todo enforce signature matches
             const call = `await (table.get(${target}))(${args.join(`, `)})`;
-            return hasResult
-                ? this.push(call)
-                : `${call};`
+            return result
+                    ? `${result} = ${call};`
+                    : `${call};`;
         });
     }
 
@@ -934,26 +930,25 @@ class Compiler {
     }
 
     _compileLocalGet(expr) {
-        return this.opcode(expr, [], () =>
-            this.push(this.local(expr.index))
+        return this.opcode(expr, [], (result) =>
+            `${result} = ${this.local(expr.index)};`
         );
     }
 
     _compileLocalSet(expr) {
-        return this.opcode(expr, [expr.value], (value) => `
+        return this.opcode(expr, [expr.value], (result, value) => `
             ${this.local(expr.index)} = ${value};
-            ${expr.isTee ? this.push(value) : ``}
         `);
     }
 
     _compileGlobalGet(expr) {
-        return this.opcode(expr, [], () => `
-            ${this.push(`${this.global(expr.name)}.value`)}
+        return this.opcode(expr, [], (result) => `
+            ${result} = ${this.global(expr.name)}.value;
         `);
     }
 
     _compileGlobalSet(expr) {
-        return this.opcode(expr, [expr.value], (value) => `
+        return this.opcode(expr, [expr.value], (result, value) => `
             ${this.global(expr.name)}.value = ${value};
         `);
     }
@@ -961,8 +956,8 @@ class Compiler {
     _compileLoad(expr) {
         const func = this.enclose(this.instance._ops.memory.load[expr.type][expr.bytes << 3][expr.isSigned ? 'signed' : 'unsigned']);
         const offset = expr.offset ? ` + ${expr.offset}` : ``;
-        return this.opcode(expr, [expr.ptr], (ptr) =>
-            this.push(`${func}(${ptr}${offset})`)
+        return this.opcode(expr, [expr.ptr], (result, ptr) =>
+            `${result} = ${func}(${ptr}${offset});`
         );
     }
 
@@ -970,8 +965,8 @@ class Compiler {
         const valueInfo = b.getExpressionInfo(expr.value);
         const func = this.enclose(this.instance._ops.memory.store[valueInfo.type][expr.bytes << 3]);
         const offset = expr.offset ? ` + ${expr.offset}` : ``;
-        return this.opcode(expr, [expr.ptr, expr.value], (ptr, value) =>
-            `${func}(${ptr}${offset}, ${value})`
+        return this.opcode(expr, [expr.ptr, expr.value], (result, ptr, value) =>
+            `${func}(${ptr}${offset}, ${value});`
         );
     }
 
@@ -983,9 +978,9 @@ class Compiler {
         } else {
             value = expr.value;
         }
-        return this.opcode(expr, [], () => {
-            return this.push(this.literal(value))
-        });
+        return this.opcode(expr, [], (result) => `
+            ${result} = ${this.literal(value)}
+        `);
     }
     
     unaryOp(op, operand) {
@@ -1000,14 +995,9 @@ class Compiler {
     }
 
     _compileUnary(expr) {
-        return this.opcode(expr, [expr.value], () => {
-            return this.push(
-                this.unaryOp(
-                    expr.op,
-                    this.pop()
-                )
-            )
-        });
+        return this.opcode(expr, [expr.value], (result, value) => `
+            ${result} = ${this.unaryOp(expr.op, value)};
+        `);
     }
 
     binaryOp(op, left, right) {
@@ -1073,38 +1063,38 @@ class Compiler {
     }
 
     _compileBinary(expr) {
-        return this.opcode(expr, [expr.left, expr.right], (left, right) =>
+        return this.opcode(expr, [expr.left, expr.right], (result, left, right) =>
             this.push(this.binaryOp(expr.op, left, right))
         );
     }
 
     _compileSelect(expr) {
-        return this.opcode(expr, [expr.ifTrue, expr.ifFalse, expr.condition], (ifTrue, ifFalse, condition) =>
-            this.push(`${condition} ? ${ifTrue} : ${ifFalse}`)
-        );
+        return this.opcode(expr, [expr.ifTrue, expr.ifFalse, expr.condition], (result, ifTrue, ifFalse, condition) => `
+            ${result} = ${condition} ? ${ifTrue} : ${ifFalse};
+        `);
     }
 
     _compileDrop(expr) {
-        return this.opcode(expr, [expr.value], (_value) => ``);
+        return this.opcode(expr, [expr.value], (result) => ``);
     }
 
     _compileMemorySize(expr) {
         const memory = this.enclose(this.instance._memory);
-        return this.opcode(expr, [], () => {
-            return this.push(`${memory}.buffer.length / 65536`)
-        });
+        return this.opcode(expr, [], (result) => `
+            ${result} = ${memory}.buffer.length / 65536;
+        `);
     }
 
     _compileMemoryGrow(expr) {
         const memory = this.enclose(this.instance._memory);
-        return this.opcode(expr, [expr.delta], (delta) => {
-            return this.push(`${memory}.grow(${delta})`)
-        });
+        return this.opcode(expr, [expr.delta], (result, delta) => `
+            ${result} = ${memory}.grow(${delta});
+        `);
     }
 
     _compileReturn(expr) {
         if (expr.value) {
-            return this.opcode(expr, [expr.value], (value) => `
+            return this.opcode(expr, [expr.value], (result, value) => `
                 return ${value};
             `)
         }
