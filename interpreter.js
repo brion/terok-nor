@@ -612,7 +612,8 @@ class Compiler {
                     frame.locals = [${compiler.localVars().join(`, `)}];
                     frame.node = spill.node;
                     return frame;
-                }
+                };
+                const interrupt = async () => instance.callback(dump());
                 try {
                     instance._stackTracers.push(dump);
                     ${body}
@@ -662,23 +663,25 @@ class Compiler {
         let source = ``;
         const streak = [];
         const spillStreak = () => {
-            source += `
-                if (instance.callback) {
-                    ${streak.map((node) => `
-                        ${node.spill}
-                        if (instance.callback) {
-                            await instance.callback(dump());
-                        }
-                        ${node.fragment}
-                    `).join('\n')}
-                } else {
-                    ${streak.map((node) => `
-                        ${node.infallible ? `` : node.spill}
-                        ${node.fragment}
-                    `).join('\n')}
-                }
-            `;
-            streak.splice(0, streak.length);
+            if (streak.length > 0) {
+                source += `
+                    if (instance.callback) {
+                        ${streak.map((node) => `
+                            ${node.spill}
+                            if (instance.callback) {
+                                await interrupt();
+                            }
+                            ${node.fragment}
+                        `).join('\n')}
+                    } else {
+                        ${streak.map((node) => `
+                            ${node.infallible ? `` : node.spill}
+                            ${node.fragment}
+                        `).join('\n')}
+                    }
+                `;
+                streak.splice(0, streak.length);
+            }
         };
         for (let node of nodes) {
             if (node.uninterruptible) {
@@ -689,7 +692,7 @@ class Compiler {
                     ${node.infallible ? `` : node.spill}
                     if (instance.callback) {
                         ${node.infallible ? node.spill : ``}
-                        await instance.callback(dump());
+                        await interrupt();
                     }
                     ${node.fragment}
                 `;
