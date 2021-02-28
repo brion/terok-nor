@@ -1063,9 +1063,9 @@ class Compiler {
     }
 
     _compileBinary(expr) {
-        return this.opcode(expr, [expr.left, expr.right], (result, left, right) =>
-            this.push(this.binaryOp(expr.op, left, right))
-        );
+        return this.opcode(expr, [expr.left, expr.right], (result, left, right) => `
+            ${result} = ${this.binaryOp(expr.op, left, right)}
+        `);
     }
 
     _compileSelect(expr) {
