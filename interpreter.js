@@ -495,15 +495,13 @@ class Compiler {
                 const spillers = [${
                     Array.from(range(compiler.maxDepth + 1), (_, depth) => {
                         return `
-                            () => {
-                                frame.stack = [${compiler.stackVars(depth).join(`, `)}];
-                            }
+                            () => [${compiler.stackVars(depth).join(`, `)}]
                         `;
                     }).join(',\n')
                 }];
                 let spill;
                 const dump = () => {
-                    spillers[spill.depth]();
+                    frame.stack = spillers[spill.depth]();
                     frame.locals = [${compiler.localVars().join(`, `)}];
                     frame.node = spill.node;
                     return frame;
