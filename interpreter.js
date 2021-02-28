@@ -444,6 +444,7 @@ const interpreterStackTrace = Symbol('interpreterStackTrace');
 class Frame {
     constructor(instance) {
         this.instance = instance;
+        this.name = '';
         this.node = null;
         this.stack = null;
         this.locals = null;
@@ -472,7 +473,6 @@ class Compiler {
     static compileBase(instance, expr, params, results, vars, name='<anonymous>') {
         const compiler = new Compiler(instance, params, vars);
         const inst = compiler.enclose(instance);
-        const frame = compiler.enclose(Frame);
         const paramNames = params.map((_type, index) => `param${index}`);
         const body = compiler.compile(expr);
         const hasResult = (results !== b.none);
@@ -481,7 +481,6 @@ class Compiler {
             return async (${paramNames.join(', ')}) => {
                 const instance = ${inst};
                 const table = instance.table;
-                const frame = new ${frame}(instance, ${compiler.literal(name)});
                 ${
                     compiler.maxDepth
                     ? `let ${compiler.stackVars(compiler.maxDepth).join(`, `)};`
@@ -492,7 +491,7 @@ class Compiler {
                     ? `let ${compiler.localInits(paramNames).join(`, `)};`
                     : ``
                 }
-                const spillers = [${
+                const stackSpill = [${
                     Array.from(range(compiler.maxDepth + 1), (_, depth) => {
                         return `
                             () => [${compiler.stackVars(depth).join(`, `)}]
@@ -501,7 +500,9 @@ class Compiler {
                 }];
                 let spill;
                 const dump = () => {
-                    frame.stack = spillers[spill.depth]();
+                    const frame = new ${compiler.enclose(Frame)}(instance);
+                    frame.name = ${compiler.literal(name)};
+                    frame.stack = stackSpill[spill.depth]();
                     frame.locals = [${compiler.localVars().join(`, `)}];
                     frame.node = spill.node;
                     return frame;
