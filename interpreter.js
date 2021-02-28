@@ -508,7 +508,7 @@ class Compiler {
                     frame.node = spill.node;
                     return frame;
                 }
-                let interrupt;
+                let interrupt = instance.callback;
                 try {
                     instance._stackTracers.push(dump);
                     ${body}
@@ -584,19 +584,39 @@ class Compiler {
         return 'label' + index;
     }
 
-    callback(expr, fallible=false) {
-        const spill = `
+    spill(expr) {
+        return `
             spill = ${this.enclose({
                 node: expr,
                 depth: this.stack.length
             })};
         `;
+    }
+
+    fallible(expr, body) {
+        const spill = this.spill(expr);
+        this.lastWasFallible = true;
         return `
-            ${fallible ? spill : ``}
-            if (instance.callback) {
-                ${fallible ? `` : spill}
-                await instance.callback(frame);
+            ${spill}
+            if (interrupt) {
+                await instance.callback(dump());
+                interrupt = instance.callback;
             }
+            ${body}
+            interrupt = instance.callback;
+        `;
+    }
+
+    infallible(expr, body) {
+        const spill = this.spill(expr);
+        this.lastWasFallible = false;
+        return `
+            if (interrupt) {
+                ${spill}
+                await instance.callback(dump());
+                interrupt = instance.callback;
+            }
+            ${body}
         `;
     }
 
@@ -670,12 +690,12 @@ class Compiler {
         return copies.join('\n');
     }
 
+    // Note currently block operations are being treated as fallible, but this needs to be thought about more.
     _compileBlock(expr) {
         let saved;
         if (expr.name !== '') {
             let label;
-            return `
-                ${this.callback(expr)}
+            return this.fallible(expr, `
                 {
                     ${(saved = this.saveStack()), ``}
                     ${label = this.label(expr.name)}:
@@ -685,36 +705,33 @@ class Compiler {
                     }
                     ${this.restoreStack(saved, resultCount(expr.type))}
                 }
-            `;
+            `);
         }
-        return this.compileMultiple(expr.children);
+        return this.fallible(expr,
+            this.compileMultiple(expr.children));
     }
 
     _compileIf(expr) {
-        if (expr.ifFalse) {
-            return `
-                ${this.compile(expr.condition)}
-                ${this.callback(expr)}
-                if (${this.pop()}) {
-                    ${this.compile(expr.ifTrue)}
-                } else {
-                    ${this.compile(expr.ifFalse)}
-                }
-            `;
-        }
         return `
             ${this.compile(expr.condition)}
-            ${this.callback(expr)}
-            if (${this.pop()}) {
-                ${this.compile(expr.ifTrue)}
-            }
+            ${this.fallible(expr, `
+                if (${this.pop()}) {
+                    ${this.compile(expr.ifTrue)}
+                }
+                ${
+                    expr.ifFalse
+                    ? `else {
+                        ${this.compile(expr.ifFalse)}
+                    }`
+                    : ``
+                }
+            `)}
         `;
     }
 
     _compileLoop(expr) {
         let outer, inner, saved;
-        return `
-            ${this.callback(expr)}
+        return this.fallible(expr, `
             {
                 ${(saved = this.saveStack()), ``}
                 ${outer = this.label(expr.name + '$$loop')}:
@@ -727,53 +744,60 @@ class Compiler {
                 }
                 ${this.restoreStack(saved, resultCount(expr.type))}
             }
-        `;
+        `);
     }
 
     _compileBreak(expr) {
+        const breaker = `
+            break ${this.label(expr.name)};
+        `;
         if (expr.condition) {
             return `
                 ${this.compile(expr.condition)}
-                ${this.callback(expr)}
-                if (${this.pop()}) {
-                    break ${this.label(expr.name)};
-                }
+                ${this.infallible(expr, `
+                    if (${this.pop()}) {
+                        ${breaker}
+                    }
+                `)}
             `;
+        } else {
+            return breaker;
         }
-        return `
-            ${this.callback(expr)}
-            break ${this.label(expr.name)};
-        `;
     }
 
     _compileSwitch(expr) {
         const labels = expr.names.map((name) => this.label(name));
         return `
             ${this.compile(expr.condition)}
-            ${this.callback(expr)}
-            switch (${this.pop()}) {
-                ${labels.map((label, index) => `
-                    case ${index}:
-                        break ${label};
-                `).join('\n')}
-                default:
-                    break ${this.label(expr.defaultName)};
-            }
+            ${this.infallible(expr, `
+                switch (${this.pop()}) {
+                    ${labels.map((label, index) => `
+                        case ${index}:
+                            break ${label};
+                    `).join('\n')}
+                    default:
+                        break ${this.label(expr.defaultName)};
+                }
+            `)}
         `;
     }
 
     _compileCall(expr) {
         const func = this.enclose(this.instance._funcs[expr.target]);
         const hasResult = (expr.type !== b.none);
-        let args, result;
+        let args, call;
+        // note that verifying functions can't throw statically is possible
+        // but will be limited to things that don't access memory so
+        // that may not have a huge benefit
         return `
             ${this.compileMultiple(expr.operands)}
-            ${this.callback(expr, true)}
-            ${
+            ${this.fallible(expr,
                 args = this.popArgs(expr.operands.length),
-                result = `await ${func}(${args})`,
-                hasResult ? this.push(result) : result
-            }
+                call = `await ${func}(${args})`,
+                hasResult
+                    ? this.push(call)
+                    : `${call};`
+            )}
         `;
     }
 
@@ -783,56 +807,57 @@ class Compiler {
         return `
             ${this.compile(expr.target)}
             ${this.compileMultiple(expr.operands)}
-            ${this.callback(expr, true)}
-            ${
-                args = this.popArgs(expr.operands.length),
-                index = this.pop(),
-                // @todo enforce signature matches
-                result = `await (table.get(${index}))(${args})`,
-                hasResult
-                    ? this.push(result)
-                    : `${result};`
-            }
+            ${this.fallible(expr, `
+                ${
+                    args = this.popArgs(expr.operands.length),
+                    index = this.pop(),
+                    // @todo enforce signature matches
+                    call = `await (table.get(${index}))(${args})`,
+                    hasResult
+                        ? this.push(call)
+                        : `${call};`
+                }
+            `)}
         `;
+    }
+
+    local(index) {
+        return `local${index}`;
+    }
+
+    global(name) {
+        return this.enclose(this.instance._globals[name]);
     }
 
     _compileLocalGet(expr) {
-        return `
-            ${this.callback(expr)}
-            ${this.push(`local${expr.index}`)}
-        `;
+        return this.infallible(expr, `
+            ${this.push(this.local(expr.index))}
+        `);
     }
 
     _compileLocalSet(expr) {
-        if (expr.isTee) {
-            return `
-                ${this.compile(expr.value)}
-                ${this.callback(expr)}
-                local${expr.index} = ${this.peek()};
-            `;
-        } else {
-            return `
-                ${this.compile(expr.value)}
-                ${this.callback(expr)}
-                local${expr.index} = ${this.pop()};
-            `;
-        }
+        return `
+            ${this.compile(expr.value)}
+            ${this.infallible(expr, `
+                ${this.local(expr.index)} = ${expr.isTee ? this.peek() : this.pop()};
+            `)}
+        `;
     }
 
     _compileGlobalGet(expr) {
-        const global = this.enclose(this.instance._globals[expr.name]);
         return `
-            ${this.callback(expr)}
-            ${this.push(`${global}.value`)}
+            ${this.infallible(expr, `
+                ${this.push(`${this.global(expr.name)}.value`)}
+            `)}
         `;
     }
 
     _compileGlobalSet(expr) {
-        const global = this.enclose(this.instance._globals[expr.name]);
         return `
             ${this.compile(expr.value)}
-            ${this.callback(expr)}
-            ${global}.value = ${this.pop()};
+            ${this.infallible(expr, `
+                ${this.global(expr.name)}.value = ${this.pop()};
+            `)}
         `;
     }
 
@@ -840,8 +865,9 @@ class Compiler {
         const func = this.enclose(this.instance._ops.memory.load[expr.type][expr.bytes << 3][expr.isSigned ? 'signed' : 'unsigned']);
         return `
             ${this.compile(expr.ptr)}
-            ${this.callback(expr, true)}
-            ${this.push(`${func}(${this.pop()} + ${expr.offset})`)}
+            ${this.fallible(expr, `
+                ${this.push(`${func}(${this.pop()}${expr.offset ? ` + ${expr.offset}` : ``})`)}
+            `)}
         `;
     }
 
@@ -852,11 +878,12 @@ class Compiler {
         return `
             ${this.compile(expr.ptr)}
             ${this.compile(expr.value)}
-            ${this.callback(expr, true)}
             ${
                 value = this.pop(),
                 ptr = this.pop(),
-                `${func}(${ptr} + ${expr.offset}, ${value})`
+                this.fallible(expr,
+                    `${func}(${ptr} + ${expr.offset}, ${value})`
+                )
             }
         `;
     }
@@ -869,10 +896,9 @@ class Compiler {
         } else {
             value = expr.value;
         }
-        return `
-            ${this.callback(expr)}
+        return this.infallible(expr, `
             ${this.push(this.literal(value))}
-        `;
+        `);
     }
     
     unaryOp(op, operand) {
@@ -887,10 +913,19 @@ class Compiler {
     }
 
     _compileUnary(expr) {
+        // @fixme get list of which instructions are fallible and make sure all are handled right
         return `
             ${this.compile(expr.value)}
-            ${this.callback(expr)}
-            ${this.push(this.unaryOp(expr.op, this.pop()))}
+            ${
+                this.infallible(expr,
+                    this.push(
+                        this.unaryOp(
+                            expr.op,
+                            this.pop()
+                        )
+                    )
+                )
+            }
         `;
     }
 
@@ -969,31 +1004,33 @@ class Compiler {
     }
 
     _compileBinary(expr) {
-        let left, right;
+        let left, right, impl;
         return `
             ${this.compile(expr.left)}
             ${this.compile(expr.right)}
-            ${this.callback(expr, this.binaryFallible(expr.op))}
             ${
                 right = this.pop(), 
                 left = this.pop(),
-                this.push(this.binaryOp(expr.op, left, right))
+                impl = this.push(this.binaryOp(expr.op, left, right)),
+                this.binaryFallible(expr.op)
+                    ? this.fallible(expr, impl)
+                    : this.infallible(expr, impl)
             }
         `;
     }
 
     _compileSelect(expr) {
-        let ifTrue, ifFalse, cond;
+        let ifTrue, ifFalse, cond, impl;
         return `
             ${this.compile(expr.ifTrue)}
             ${this.compile(expr.ifFalse)}
             ${this.compile(expr.condition)}
-            ${this.callback(expr)}
             ${
                 cond = this.pop(),
                 ifFalse = this.pop(),
                 ifTrue = this.pop(),
-                this.push(`${cond} ? ${ifTrue} : ${ifFalse}`)
+                impl = this.push(`${cond} ? ${ifTrue} : ${ifFalse}`),
+                this.infallible(expr, impl)
             }
         `;
     }
@@ -1001,16 +1038,16 @@ class Compiler {
     _compileDrop(expr) {
         return `
             ${this.compile(expr.value)}
-            ${this.callback(expr)}
-            ${this.drop()};
+            ${this.infallible(expr, this.drop())}
         `;
     }
 
     _compileMemorySize(expr) {
         const memory = this.enclose(this.instance._memory);
         return `
-            ${this.callback(expr)}
-            ${this.push(`${memory}.buffer.length / 65536`)}
+            ${this.infallible(expr,
+                this.push(`${memory}.buffer.length / 65536`)
+            )}
         `;
     }
 
@@ -1018,8 +1055,9 @@ class Compiler {
         const memory = this.enclose(this.instance._memory);
         return `
             ${this.compile(expr.delta)}
-            ${this.callback(expr, true)}
-            ${this.push(`${memory}.grow(${this.pop()})`)}
+            ${this.fallible(expr,
+                this.push(`${memory}.grow(${this.pop()})`)
+            )}
         `;
     }
 
@@ -1027,26 +1065,27 @@ class Compiler {
         if (expr.value) {
             return `
                 ${this.compile(expr.value)}
-                ${this.callback(expr)}
-                return ${this.pop()};
+                ${this.infallible(expr, `
+                    return ${this.pop()};
+                `)}
             `;
         } else {
             return `
-                ${this.callback(expr)}
-                return;
+                ${this.infallible(expr, `
+                    return;
+                `)}
             `;
         }
     }
 
     _compileNop(expr) {
-        return `${this.callback(expr)}`;
+        return this.infallible(expr, ``);
     }
 
     _compileUnreachable(expr) {
-        return `
-            ${this.callback(expr, true)}
+        return this.fallible(expr, `
             throw new WebAssembly.RuntimeError("Unreachable");
-        `;
+        `);
     }
 }
 
