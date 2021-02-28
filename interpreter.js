@@ -661,42 +661,46 @@ class Compiler {
     }
 
     flatten(nodes) {
+        const single = (node) => `
+            ${node.infallible ? `` : node.spill}
+            if (instance.callback) {
+                ${node.infallible ? node.spill : ``}
+                await interrupt();
+            }
+            ${node.fragment}
+        `;
+        const multiple = (nodes) => `
+            if (instance.callback) {
+                ${nodes.map((node) => `
+                    ${node.spill}
+                    if (instance.callback) {
+                        await interrupt();
+                    }
+                    ${node.fragment}
+                `).join('\n')}
+            } else {
+                ${nodes.map((node) => `
+                    ${node.infallible ? `` : node.spill}
+                    ${node.fragment}
+                `).join('\n')}
+            }
+        `;
         let source = ``;
         const streak = [];
         const spillStreak = () => {
-            if (streak.length > 0) {
-                source += `
-                    if (instance.callback) {
-                        ${streak.map((node) => `
-                            ${node.spill}
-                            if (instance.callback) {
-                                await interrupt();
-                            }
-                            ${node.fragment}
-                        `).join('\n')}
-                    } else {
-                        ${streak.map((node) => `
-                            ${node.infallible ? `` : node.spill}
-                            ${node.fragment}
-                        `).join('\n')}
-                    }
-                `;
-                streak.splice(0, streak.length);
+            if (streak.length > 1) {
+                source += multiple(streak);
+            } else if (streak.length == 1) {
+                source += single(streak[0])
             }
+            streak.splice(0, streak.length);
         };
         for (let node of nodes) {
             if (node.uninterruptible) {
                 streak.push(node);
             } else {
                 spillStreak();
-                source += `
-                    ${node.infallible ? `` : node.spill}
-                    if (instance.callback) {
-                        ${node.infallible ? node.spill : ``}
-                        await interrupt();
-                    }
-                    ${node.fragment}
-                `;
+                source += single(node);
             }
         }
         spillStreak();
