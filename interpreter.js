@@ -626,6 +626,7 @@ class Compiler {
                             e[${stackKey}] = [dump];
                         }
                     }
+                    throw e;
                 } finally {
                     instance._stackTracers.pop();
                 }
