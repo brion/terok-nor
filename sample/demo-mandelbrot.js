@@ -47,27 +47,17 @@ const imports = {
 
     console.log('Interpreted async execution:');
     const interp = await Interpreter.instantiate(wasm, imports);
-    /*
-    function delay(ms) {
-        return new Promise((resolve, reject) => {
-            setTimeout(() => {
-                resolve();
-            }, ms);
-        });
-    }
-    */
-    /*
-    interp.instance.callback = async (frame) => {
-        //await delay(1);
-        console.log({
-            node: frame.node,
-            stack: frame.stack,
-            locals: frame.locals
-        });
-    };
-    */
-    //interp.instance.callback = async (frame) => {};
     await test(interp.instance);
+
+    console.log('Debuggable async execution:');
+    const debug = await Interpreter.instantiate(wasm, imports, {
+        debug: true
+    });
+    await test(debug.instance);
+
+    console.log('Debuggable async execution with a hook:');
+    debug.instance.callback = async (frame) => {};
+    await test(debug.instance);
 
     console.log('done.');
 

@@ -87,8 +87,9 @@ function normalizeBuffer(bufferSource) {
 
 /// Module class for reading a WebAssembly module.
 class Module {
-    constructor(bufferSource) {
+    constructor(bufferSource, {debug=false}) {
         this._mod = null;
+        this._debug = debug;
 
         let input = normalizeBuffer(bufferSource);
         if (!b.isReady) {
@@ -98,6 +99,9 @@ class Module {
 
         this.isReady = false;
         this.ready = b.ready.then(async () => {
+            // @todo move the compilation in here
+            // also allow reconstituting the JS source
+            // and not having to touch binaryen
             this._mod = b.readBinary(input);
             this.isReady = true;
             return this;
@@ -110,6 +114,7 @@ class Instance {
         this.exports = {};
         this.callback = null;
 
+        this._debug = module._debug;
         this._mod = module._mod;
         this._globals = {};
         this._funcs = {};
@@ -213,7 +218,7 @@ class Instance {
                                 }
                             };
                         `;
-                        console.log(code);
+                        //console.log(code);
                         thunk = (new Function('imported', code))(imported);
                     } else {
                         throw new RangeError("Expected function for import");
@@ -297,8 +302,8 @@ class Instance {
 /// Parse a module from binary form and prepare it to be instantiated later.
 /// Currently this compilation is done synchronously on the main thread,
 /// but please use this async API for future-proofing.
-async function compile(bufferSource) {
-    const module = new Module(bufferSource);
+async function compile(bufferSource, options={}) {
+    const module = new Module(bufferSource, options);
     return await module.ready;
 }
 
@@ -306,16 +311,16 @@ async function compile(bufferSource) {
 /// instantiated later. Currently this compilation is done synchronously on
 /// the main thread after the whole stream is collected in memory, but please
 /// use this async API for future-proofing.
-async function compileStreaming(source) {
+async function compileStreaming(source, options={}) {
     const response = await source;
     const buffer = await response.arrayBuffer();
-    const module = new Module(buffer);
+    const module = new Module(buffer, options);
     return await module.ready;
 }
 
 /// Parse/compile and instantiate from a buffer
-async function instantiate(bufferSource, importObject) {
-    const module = await compile(bufferSource);
+async function instantiate(bufferSource, importObject, options={}) {
+    const module = await compile(bufferSource, options);
     const instance = new Instance(module, importObject);
     await instance.ready;
     return {
@@ -325,8 +330,8 @@ async function instantiate(bufferSource, importObject) {
 }
 
 /// Parse/compile and instantiate from a Response or Promise<Response>
-async function instantiateStreaming(source, importObject) {
-    const module = await compileStreaming(source);
+async function instantiateStreaming(source, importObject, options={}) {
+    const module = await compileStreaming(source, options);
     const instance = new Instance(module, importObject);
     await instance.ready;
     return {
@@ -597,23 +602,29 @@ class Compiler {
                     ? `let ${compiler.localInits(paramNames).join(`, `)};`
                     : ``
                 }
-                const stackSpill = [${
-                    Array.from(range(compiler.maxDepth + 1), (_, depth) => {
-                        return `
-                            () => [${compiler.stackVars(depth).join(`, `)}]
-                        `;
-                    }).join(',\n')
-                }];
                 let spill;
+                ${instance._debug ? `
+                    const stackSpill = [${
+                        Array.from(range(compiler.maxDepth + 1), (_, depth) => {
+                            return `
+                                () => [${compiler.stackVars(depth).join(`, `)}]
+                            `;
+                        }).join(',\n')
+                    }];
+                ` : ``}
                 const dump = () => {
                     const frame = new ${compiler.enclose(Frame)}(instance);
                     frame.name = ${compiler.literal(name)};
-                    frame.stack = stackSpill[spill.depth]();
-                    frame.locals = [${compiler.localVars().join(`, `)}];
+                    ${instance._debug ? `` : `
+                        frame.stack = stackSpill[spill.depth]();
+                        frame.locals = [${compiler.localVars().join(`, `)}];
+                    `}
                     frame.node = spill.node;
                     return frame;
                 };
-                const interrupt = async () => instance.callback(dump());
+                ${instance._debug ? `
+                    const interrupt = async () => instance.callback(dump());
+                `: ``}
                 try {
                     instance._stackTracers.push(dump);
                     ${body}
@@ -634,8 +645,8 @@ class Compiler {
         `;
         const closureNames = compiler.closure.map((_val, index) => `closure${index}`);
         const args = closureNames.concat([func]);
-        console.log({closureNames, closure: compiler.closure})
-        console.log(func);
+        //console.log({closureNames, closure: compiler.closure})
+        //console.log(func);
         return Reflect.construct(Function, args).apply(null, compiler.closure);
     }
 
@@ -655,13 +666,17 @@ class Compiler {
         if (this[handler]) {
             return this[handler](expr);
         } else {
-            console.log({expression});
+            //console.log({expression});
             throw new RangeError("Cannot compile unknown expression");
         }
     }
 
     flatten(nodes) {
-        const single = (node) => `
+        const cleanPath = (node) => `
+            ${node.infallible ? `` : node.spill}
+            ${node.fragment}
+        `;
+        const dirtyPath = (node) => `
             ${node.infallible ? `` : node.spill}
             if (instance.callback) {
                 ${node.infallible ? node.spill : ``}
@@ -669,42 +684,39 @@ class Compiler {
             }
             ${node.fragment}
         `;
-        const multiple = (nodes) => `
-            if (instance.callback) {
-                ${nodes.map((node) => `
-                    ${node.spill}
-                    if (instance.callback) {
-                        await interrupt();
-                    }
-                    ${node.fragment}
-                `).join('\n')}
-            } else {
-                ${nodes.map((node) => `
-                    ${node.infallible ? `` : node.spill}
-                    ${node.fragment}
-                `).join('\n')}
+        if (this.instance._debug) {
+            const bifurcate = (nodes) => `
+                if (instance.callback) {
+                    ${nodes.map(dirtyPath).join('\n')}
+                } else {
+                    ${nodes.map(cleanPath).join('\n')}
+                }
+            `;
+            let source = ``;
+            const streak = [];
+            const spillStreak = () => {
+                if (streak.length > 1) {
+                    source += bifurcate(streak);
+                } else if (streak.length == 1) {
+                    source += dirtyPath(streak[0])
+                }
+                streak.splice(0, streak.length);
+            };
+            for (let node of nodes) {
+                if (node.uninterruptible) {
+                    streak.push(node);
+                } else {
+                    spillStreak();
+                    source += dirtyPath(node);
+                }
             }
-        `;
-        let source = ``;
-        const streak = [];
-        const spillStreak = () => {
-            if (streak.length > 1) {
-                source += multiple(streak);
-            } else if (streak.length == 1) {
-                source += single(streak[0])
-            }
-            streak.splice(0, streak.length);
-        };
-        for (let node of nodes) {
-            if (node.uninterruptible) {
-                streak.push(node);
-            } else {
-                spillStreak();
-                source += single(node);
-            }
+            spillStreak();
+            return source;
+        } else {
+            return `
+                ${nodes.map(cleanPath).join('\n')}
+            `;
         }
-        spillStreak();
-        return source;
     }
 
     enclose(val) {
