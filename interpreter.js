@@ -489,7 +489,7 @@ class Compiler {
                 const spillers = [${
                     Array.from(range(compiler.maxDepth + 1), (_, depth) => {
                         return `
-                            (state) => {
+                            () => {
                                 frame.stack = [${compiler.stackVars(depth).join(`, `)}];
                             }
                         `;
@@ -503,7 +503,7 @@ class Compiler {
                     if (spill) {
                         frame.node = spill.node;
                         frame.locals = [${compiler.localVars().join(`, `)}];
-                        spillers[spill.depth](spill);
+                        spillers[spill.depth]();
                         if (e[${stackKey}]) {
                             e[${stackKey}].push(frame);
                         } else {
