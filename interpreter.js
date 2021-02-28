@@ -824,7 +824,7 @@ class Compiler {
         let saved;
         if (expr.name !== '') {
             let label;
-            return this.opcode(expr, expr.children, (result) => `
+            return this.opcode(expr, [], (result) => `
                 {
                     ${(saved = this.saveStack()), ``}
                     ${label = this.label(expr.name)}:
