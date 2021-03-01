@@ -71,6 +71,26 @@ const imports = {
         return instance;
     }
 
+
+    console.log('Compiling optimized...');
+    const source = path.join(__dirname, 'compiled-mandelbrot.js');
+    fs.writeFileSync(
+        source,
+        (await optimized()).exports.iterate_mandelbrot.toString()
+    );
+    console.log(`wrote source to ${source}`);
+    console.log(``);
+
+    console.log('Compiling debug...');
+    const sourceDebug = path.join(__dirname, 'compiled-mandelbrot-debug.js');
+    fs.writeFileSync(
+        sourceDebug,
+        (await debug()).exports.iterate_mandelbrot.toString()
+    );
+    console.log(`wrote source to ${sourceDebug}`);
+    console.log(``);
+
+
     await test('Native sync execution', native);
 
 
@@ -112,21 +132,6 @@ const imports = {
         instance.singleStep = false;
         console.log(`Hit callback ${counted} times!`);
     });
-
-    
-    const source = path.join(__dirname, 'compiled-mandelbrot.js');
-    fs.writeFileSync(
-        source,
-        (await optimized()).exports.iterate_mandelbrot.toString()
-    );
-    console.log(`wrote source to ${source}`);
-
-    const sourceDebug = path.join(__dirname, 'compiled-mandelbrot-debug.js');
-    fs.writeFileSync(
-        sourceDebug,
-        (await debug()).exports.iterate_mandelbrot.toString()
-    );
-    console.log(`wrote source to ${sourceDebug}`);
 
 
     console.log('done.');
