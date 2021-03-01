@@ -1234,6 +1234,22 @@ class Compiler {
         case b.NegFloat32:
         case b.NegFloat64:
             return `-${operand}`;
+        case b.ConvertSInt32ToFloat32:
+            return `${this.enclose(Math.fround)}(+${operand})`;
+        case b.ConvertSInt32ToFloat64:
+            return `+${operand}`;
+        case b.ConvertUInt32ToFloat32:
+            return `${this.enclose(Math.fround)}(+(${operand} >>> 0))`;
+        case b.ConvertUInt32ToFloat64:
+            return `+(${operand} >>> 0)`;
+        case b.ConvertSInt64ToFloat32:
+            return `+Number(${operand})`;
+        case b.ConvertSInt64ToFloat64:
+            return `${this.enclose(Math.fround)}(+Number(${operand}))`;
+        case b.ConvertUInt64ToFloat32:
+            return `+Number(BigInt.asUintN(64, ${operand}))`;
+        case b.ConvertUInt64ToFloat64:
+            return `${this.enclose(Math.fround)}(+Number(BigInt.asUintN(64, ${operand})))`;
         default:
             const func = this.instance._ops.unary[op];
             return `/* unary${op} */ ${this.enclose(func)}(${operand})`;
@@ -1250,14 +1266,22 @@ class Compiler {
         switch (op) {
             case b.AddInt32:
                 return `${left} + ${right} | 0`;
+            case b.AddFloat32:
+                return `${this.enclose(Math.fround)}(${left} + ${right})`;
             case b.AddFloat64:
                 return `${left} + ${right}`;
             case b.SubInt32:
                 return `${left} - ${right} | 0`;
+            case b.SubFloat32:
+                return `${this.enclose(Math.fround)}(${left} - ${right})`;
             case b.SubFloat64:
                 return `${left} - ${right}`;
+            case b.MulFloat32:
+                return `${this.enclose(Math.fround)}(${left} * ${right})`;
             case b.MulFloat64:
                 return `${left} * ${right}`;
+            case b.DivFloat32:
+                return `${this.enclose(Math.fround)}(${left} / ${right})`;
             case b.DivFloat64:
                 return `${left} / ${right}`;
             case b.AndInt32:
