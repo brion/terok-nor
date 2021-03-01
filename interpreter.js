@@ -118,7 +118,7 @@ class Instance {
         this._debug = module._debug;
         this._interrupt = false;
         this._singleStep = false;
-        this._breakpoints = [];
+        this._breakpoints = new Uint8Array();
         this._breakpointsActive = 0;
         this._breakpointNodes = new Map();
         this.debugger = null;
@@ -321,7 +321,7 @@ class Instance {
     setBreakpoint(sourceLocation) {
         const index = this._breakpointIndex(sourceLocation);
         if (!this._breakpoints[index]) {
-            this._breakpoints[index] = true;
+            this._breakpoints[index] = 1;
             this._breakpointsActive++;
             this._updateInterrupt();
         }
@@ -330,7 +330,7 @@ class Instance {
     clearBreakpoint(sourceLocation) {
         const index = this._breakpointIndex(sourceLocation);
         if (this._breakpoints[index]) {
-            this._breakpoints[index] = false;
+            this._breakpoints[index] = 0;
             this._breakpointsActive--;
             this._updateInterrupt();
         }
@@ -359,7 +359,14 @@ class Instance {
         if (nodes.has(sourceLocation)) {
             return nodes.get(sourceLocation);
         } else {
-            const index = this._breakpoints.push(false);
+            // Using a plain array is _very slightly_ slower.
+            //const index = this._breakpoints.push(false) - 1;
+
+            const index = this._breakpoints.length;
+            const extended = new Uint8Array(index + 1);
+            extended.set(this._breakpoints);
+            this._breakpoints = extended; // hack hack hack test
+
             nodes.set(sourceLocation, index);
             return index;
         }
@@ -758,11 +765,9 @@ class Compiler {
         `;
         const dirtyPath = (node) => `
             ${node.infallible ? `` : node.spill}
-            if (instance._interrupt) {
-                if (instance._singleStep || breakpoints[${this.instance._breakpointIndex(node.sourceLocation)}]) {
-                    ${node.infallible ? node.spill : ``}
-                    await instance.debugger();
-                }
+            if (instance._singleStep || (instance._breakpointsActive && breakpoints[${this.instance._breakpointIndex(node.sourceLocation)}])) {
+                ${node.infallible ? node.spill : ``}
+                await instance.debugger();
             }
             ${console.log({node}),node.fragment}
         `;
