@@ -17,7 +17,7 @@ const imports = {
         var maxIters = 1000;
 
         // Give some warmup time for the function
-        for (let i = 0; i < 20; i++) {
+        for (let i = 0; i < 1000; i++) {
             await instance.exports.iterate_mandelbrot(0, 0, maxIters);
         }
 
@@ -61,21 +61,25 @@ const imports = {
     await test(debug.instance);
 
     console.log('Debuggable async execution with an un-hit breakpoint:');
-    const breakpoint = '5581904';
-    //const breakpoint = 'fake_location';
+    let breakpoint = 'fake_location';
     let counted = 0;
     debug.instance.debugger = async () => {
-        //console.log('breakpoint reached');
+        counted++;
         //const frame = debug.instance.stackTrace(0, 1);
         //console.log(frame);
-        counted++;
     };
     debug.instance.setBreakpoint(breakpoint);
     await test(debug.instance);
     debug.instance.clearBreakpoint(breakpoint);
     console.log(`Hit breakpoint ${counted} times!`);
 
-    process.exit(1);
+    console.log('Debuggable async execution with a hit breakpoint:');
+    breakpoint = '5581904';
+    counted = 0;
+    debug.instance.setBreakpoint(breakpoint);
+    await test(debug.instance);
+    debug.instance.clearBreakpoint(breakpoint);
+    console.log(`Hit breakpoint ${counted} times!`);
 
     console.log('Debuggable async execution with a single-step hook:');
     debug.instance.debugger = async () => {
