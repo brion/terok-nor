@@ -706,7 +706,7 @@ class Compiler {
                     }];
                 ` : ``}
                 const dump = () => {
-                    const frame = new ${compiler.enclose(Frame)}(instance);
+                    const frame = /* Frame */ new ${compiler.enclose(Frame)}(instance);
                     frame.name = ${compiler.literal(name)};
                     ${instance._debug ? `
                         frame.stack = stackSpill[node.depth]();
@@ -825,7 +825,7 @@ class Compiler {
             case 'bigint':
                 return `${value}n`;
             default:
-                return this.enclose(value);
+                return `/* literal */ ${this.enclose(value)}`;
         }
     }
 
@@ -1009,9 +1009,9 @@ class Compiler {
     }
 
     _compileCall(expr) {
-        const func = this.enclose(this.instance._funcs[expr.target]);
+        const func = this.instance._funcs[expr.target];
         return this.opcode(expr, expr.operands, (result, ...args) => {
-            const call = `await ${func}(${args.join(', ')})`;
+            const call = `await /* func.name */ ${this.enclose(func)}(${args.join(', ')})`;
             return result
                     ? `${result} = ${call};`
                     : `${call};`;
@@ -1033,7 +1033,7 @@ class Compiler {
     }
 
     global(name) {
-        return this.enclose(this.instance._globals[name]);
+        return `/* global ${this.literal(name)} */ ${this.enclose(this.instance._globals[name])}`;
     }
 
     _compileLocalGet(expr) {
@@ -1061,19 +1061,20 @@ class Compiler {
     }
 
     _compileLoad(expr) {
-        const func = this.enclose(this.instance._ops.memory.load[expr.type][expr.bytes << 3][expr.isSigned ? 'signed' : 'unsigned']);
+        const signed = expr.isSigned ? 'signed' : 'unsigned';
+        const func = this.instance._ops.memory.load[expr.type][expr.bytes << 3][signed];
         const offset = expr.offset ? ` + ${expr.offset}` : ``;
         return this.opcode(expr, [expr.ptr], (result, ptr) =>
-            `${result} = ${func}(${ptr}${offset});`
+            `${result} = /* ${func.opname} */ ${this.enclose(func)}(${ptr}${offset});`
         );
     }
 
     _compileStore(expr) {
         const valueInfo = getExpressionInfo(expr.value);
-        const func = this.enclose(this.instance._ops.memory.store[valueInfo.type][expr.bytes << 3]);
+        const func = this.instance._ops.memory.store[valueInfo.type][expr.bytes << 3];
         const offset = expr.offset ? ` + ${expr.offset}` : ``;
         return this.opcode(expr, [expr.ptr, expr.value], (result, ptr, value) =>
-            `${func}(${ptr}${offset}, ${value});`
+            `/* ${func.opname} */ ${this.enclose(func)}(${ptr}${offset}, ${value});`
         );
     }
 
@@ -1096,8 +1097,8 @@ class Compiler {
         case b.NegFloat64:
             return `-${operand}`;
         default:
-            const func = this.enclose(this.instance._ops.binary[op]);
-            return `${func}(${operand})`;
+            const func = this.instance._ops.unary[op];
+            return `/* ${func.opname} */ ${this.enclose(func)}(${operand})`;
         }
     }
 
@@ -1164,8 +1165,8 @@ class Compiler {
             case b.GeFloat64:
                 return `(${left} >= ${right}) | 0`;
             default:
-                const func = this.enclose(this.instance._ops.binary[op]);
-                return `${func}(${left}, ${right})`;
+                const func = this.instance._ops.binary[op];
+                return `/* ${func.opname} */ ${this.enclose(func)}(${left}, ${right})`;
         }
     }
 
@@ -1188,14 +1189,14 @@ class Compiler {
     _compileMemorySize(expr) {
         const memory = this.enclose(this.instance._memory);
         return this.opcode(expr, [], (result) => `
-            ${result} = ${memory}.buffer.length / 65536;
+            ${result} = /* memory */ ${memory}.buffer.length / 65536;
         `);
     }
 
     _compileMemoryGrow(expr) {
         const memory = this.enclose(this.instance._memory);
         return this.opcode(expr, [expr.delta], (result, delta) => `
-            ${result} = ${memory}.grow(${delta});
+            ${result} = /* memory */ ${memory}.grow(${delta});
         `);
     }
 
@@ -1224,6 +1225,25 @@ class Compiler {
 function buildOpsModule(memory) {
     const m = b.parseText("(module)");
     m.addMemoryImport("memory", "env", "memory");
+
+    const promote = (expr, type) => {
+        if (type == b.f32) {
+            return m.f64.promote(expr);
+        }
+        return expr;
+    };
+    const demote = (expr, type) => {
+        if (type == b.f32) {
+            return m.f32.demote(expr);
+        }
+        return expr;
+    };
+    const adapt = (type) => {
+        if (type == b.f32) {
+            return b.f64;
+        }
+        return type;
+    };
 
     const unaryOps = [
         [b.ClzInt32, m.i32.clz, b.i32, b.i32],
@@ -1279,10 +1299,10 @@ function buildOpsModule(memory) {
     ];
     for (let [op, builder, result, operand] of unaryOps) {
         const name = "unary" + op;
-        const params = b.createType([operand]);
+        const params = b.createType([adapt(operand)]);
         const arg = m.local.get(0);
-        const body = builder(arg);
-        m.addFunction(name, params, result, [], body);
+        const body = builder(demote(arg, operand));
+        m.addFunction(name, params, adapt(result), [], promote(body, result));
         m.addFunctionExport(name, name);
     }
 
@@ -1364,13 +1384,14 @@ function buildOpsModule(memory) {
         [b.MaxFloat32, m.f32.max, b.f32, b.f32],
         [b.MaxFloat64, m.f64.max, b.f64, b.f64]
     ];
+    //console.log(binaryOps);
     for (let [op, builder, result, operand] of binaryOps) {
         const name = "binary" + op;
-        const params = b.createType([operand, operand]);
+        const params = b.createType([adapt(operand), adapt(operand)]);
         const left = m.local.get(0);
         const right = m.local.get(1);
-        const body = builder(left, right);
-        m.addFunction(name, params, result, [], body);
+        const body = builder(demote(left, operand), demote(right, operand));
+        m.addFunction(name, params, adapt(result), [], promote(body, result));
         m.addFunctionExport(name, name);
     }
 
@@ -1386,13 +1407,15 @@ function buildOpsModule(memory) {
         ['i64_load16_u', m.i64.load16_u, b.i64],
         ['i64_load32_s', m.i64.load32_s, b.i64],
         ['i64_load32_u', m.i64.load32_u, b.i64],
-        ['i64_load', m.i64.load, b.i64]
+        ['i64_load', m.i64.load, b.i64],
+        ['f32_load', m.f32.load, b.f32],
+        ['f64_load', m.f64.load, b.f64]
     ];
     for (let [name, builder, result] of loadOps) {
         const params = b.createType([b.i32]);
         const arg = m.local.get(0);
         const body = builder(0, 1, arg);
-        m.addFunction(name, params, result, [], body);
+        m.addFunction(name, params, adapt(result), [], promote(body, result));
         m.addFunctionExport(name, name);
     }
 
@@ -1403,39 +1426,60 @@ function buildOpsModule(memory) {
         ['i64_store8', m.i64.store8, b.i64],
         ['i64_store16', m.i64.store16, b.i64],
         ['i64_store32', m.i64.store32, b.i64],
-        ['i64_store', m.i64.store, b.i64]
+        ['i64_store', m.i64.store, b.i64],
+        ['f32_store', m.f32.store, b.f32],
+        ['f64_store', m.f64.store, b.f64]
     ];
     for (let [name, builder, operand] of storeOps) {
-        const params = b.createType([b.i32, operand]);
+        const params = b.createType([b.i32, adapt(operand)]);
         const ptr = m.local.get(0);
         const value = m.local.get(1);
-        const body = builder(0, 1, ptr, value);
+        const body = builder(0, 1, ptr, demote(value, operand));
         m.addFunction(name, params, b.none, [], body);
         m.addFunctionExport(name, name);
     }
 
     const bytes = m.emitBinary();
+    //console.log(m.emitText());
+
     const wasm = new WebAssembly.Module(bytes);
     const instance = new WebAssembly.Instance(wasm, {
         env: {
             memory
         }
     });
+    /*
+    const exports = {};
+    for (const [name, item] of Object.entries(instance.exports)) {
+        if (item instanceof Function) {
+            exports[name] = (...args) => {
+                try {
+                    return item(...args);
+                } catch (e) {
+                    console.log(`${name} is what died`);
+                    throw e;
+                }
+            }
+            exports[name].opname = name;
+        }
+    }
+    */
+    const exports = instance.exports;
 
     function maxOp(list) {
         return Math.max.apply(null, list.map(([op]) => op));
     }
     function opArray(prefix, list) {
-        const ops = new Array(maxOp(unaryOps));
+        const ops = new Array(maxOp(list));
         for (let [op] of list) {
-            ops[op] = instance.exports[prefix + op];
+            ops[op] = exports[prefix + op];
         }
         return ops;
     }
     return {
         unary: opArray('unary', unaryOps),
         binary: opArray('binary', binaryOps),
-        memory: buildMemoryOps(instance.exports)
+        memory: buildMemoryOps(exports)
     };
 }
 
