@@ -15,11 +15,10 @@ const imports = {
     const repeat = 3;
 
     async function test(name, setup, after=null) {
-        console.log(`${name}:`);
         const instance = await setup();
 
         for (let i = 0; i < repeat; i++) {
-            console.log(`(iteration ${i} of ${repeat}:)`);
+            console.log(`${name} (iteration ${i + 1} of ${repeat})`);
 
             var x0 = -2.5, x1 = 1, y0 = -1, y1 = 1;
             var cols = 72, rows = 24;
@@ -48,6 +47,7 @@ const imports = {
             }
             const delta = Date.now() - start;
             console.log(delta + ' ms');
+            console.log('');
         }
         if (after) {
             await after(instance);
@@ -79,57 +79,46 @@ const imports = {
 
     let counted = 0;
     let breakpoint = 'fake_location';
-    await test('Debuggable async execution with an un-hit breakpoint', async () => {
-        const instance = await debug();
-        instance.debugger = async () => {
-            counted++;
-            //const frame = instance.stackTrace(0, 1);
-            //console.log(frame);
-        };
-        instance.setBreakpoint(breakpoint);
-        return instance;
-    }, async (instance) => {
-        instance.clearBreakpoint(breakpoint);
-        console.log(`Hit breakpoint ${counted} times!`);
-    });
-
-
-    counted = 0;
-    breakpoint = '5581904';
     await test('Debuggable async execution with a hit breakpoint', async () => {
         const instance = await debug();
+
+        // hack to find a live breakpoint
+        const nodes = Array.from(instance._breakpointNodes.keys());
+        breakpoint = nodes[Math.round((nodes.length - 1) / 2)];
+
         instance.debugger = async () => {
             counted++;
-            //const frame = instance.stackTrace(0, 1);
-            //console.log(frame);
         };
         instance.setBreakpoint(breakpoint);
         return instance;
     }, async (instance) => {
         instance.clearBreakpoint(breakpoint);
-        console.log(`Hit breakpoint ${counted} times!`);
+        console.log(`Hit breakpoint ${counted} times on ${breakpoint}!`);
     });
 
-
+    
+    counted = 0;
     await test('Debuggable async execution with a single-step hook', async () => {
         const instance = await debug();
         instance.debugger = async () => {
-            //const frame = instance.stackTrace(0, 1);
-            //console.log(frame);
+            counted++;
         };
         instance.singleStep = true;
         return instance;
     }, async (instance) => {
         instance.singleStep = false;
+        console.log(`Hit callback ${counted} times!`);
     });
 
-    console.log('done.');
-
+    
     const source = path.join(__dirname, 'compiled-mandelbrot.js');
     fs.writeFileSync(
         source,
         (await debug()).exports.iterate_mandelbrot.toString()
     );
     console.log(`wrote source to ${source}`);
+
+
+    console.log('done.');
 
 })();

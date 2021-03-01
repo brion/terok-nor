@@ -857,8 +857,15 @@ class Compiler {
     }
 
     spill(expr) {
+        // @todo ship these object literals in the generated wrapper
+        // function instead of live objects, so we can reconstitute source.
+        // object literals should be avoided so we only have to do a single
+        // property store on this code path
         return `
-                spill = {sourceLocation: ${this.literal(expr.sourceLocation)}, depth: ${this.literal(this.stack.length)}};
+                spill = ${this.enclose({
+                    sourceLocation: expr.sourceLocation,
+                    depth: this.literal(this.stack.length)
+                })};
         `;
     }
 
