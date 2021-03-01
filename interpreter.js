@@ -764,10 +764,10 @@ class Compiler {
             if (instance._interrupt) {
                 if (singleStep.size || breakpoints.get(${this.literal(node.sourceLocation)})) {
                     ${node.infallible ? node.spill : ``}
-                    await instance._handleInterrupt();
+                    await instance._handleInterrupt(${this.literal(node.sourceLocation)});
                 }
             }
-            ${node.fragment}
+            ${console.log({node}),node.fragment}
         `;
         const bifurcate = (nodes) => `
             if (instance._interrupt) {
@@ -855,6 +855,7 @@ class Compiler {
             this.push();
         }
         nodes.push({
+            sourceLocation: expr.sourceLocation,
             uninterruptible: uninterruptible(expr),
             infallible: infallible(expr),
             fragment: builder(result, ...stackVars),

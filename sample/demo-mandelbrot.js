@@ -67,9 +67,11 @@ const imports = {
     console.log('Debuggable async execution with a breakpoint:');
     const breakpoint = '5581904';
     const breaker = async () => {
+        /*
         console.log('breakpoint reached');
         const frame = debug.instance.stackTrace(0, 1);
         console.log(frame);
+        */
     };
     debug.instance.setBreakpoint(breakpoint, breaker);
     await test(debug.instance);
