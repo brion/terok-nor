@@ -124,12 +124,12 @@ class Instance {
         // For debugging support
         this._debug = module._debug;
         this._singleStep = 0;
-        this._breakpoints = new Int32Array();
-        this._breakpointSequences = new Int32Array();
-        this._breakpointsActive = 0;
-        this._breakpointNodes = new Map();
+        this._activeBreakpoints = new Int32Array();
+        this._sequenceIndexes = new Int32Array();
+        this._activeBreakpointCount = 0;
+        this._breakpointIndexes = new Map();
         this._sequences = [];
-        this._sequencesActive = new Int32Array();
+        this._activeSequences = new Int32Array();
         this.debugger = null;
 
         this._mod = module._mod;
@@ -317,33 +317,33 @@ class Instance {
 
     setBreakpoint(sourceLocation) {
         const index = this._breakpointIndex(sourceLocation);
-        if (!this._breakpoints[index]) {
-            this._breakpoints[index] = 1;
-            this._breakpointsActive++;
+        if (!this._activeBreakpoints[index]) {
+            this._activeBreakpoints[index] = 1;
+            this._activeBreakpointCount++;
 
-            const sequence = this._breakpointSequences[index];
+            const sequence = this._sequenceIndexes[index];
             if (sequence > -1) {
-                this._sequencesActive[sequence]++;
+                this._activeSequences[sequence]++;
             }
         }
     }
 
     clearBreakpoint(sourceLocation) {
         const index = this._breakpointIndex(sourceLocation);
-        if (this._breakpoints[index]) {
-            this._breakpoints[index] = 0;
-            this._breakpointsActive--;
+        if (this._activeBreakpoints[index]) {
+            this._activeBreakpoints[index] = 0;
+            this._activeBreakpointCount--;
 
-            const sequence = this._breakpointSequences[index];
+            const sequence = this._sequenceIndexes[index];
             if (sequence > -1) {
-                this._sequencesActive[sequence]--;
+                this._activeSequences[sequence]--;
             }
         }
     }
 
     hasBreakpoint(sourceLocation) {
         const index = this._breakpointIndex(sourceLocation);
-        return this._breakpoints[index];
+        return this._activeBreakpoints[index];
     }
 
     get singleStep() {
@@ -355,17 +355,14 @@ class Instance {
     }
 
     _breakpointIndex(sourceLocation) {
-        const nodes = this._breakpointNodes;
+        const nodes = this._breakpointIndexes;
         if (nodes.has(sourceLocation)) {
             return nodes.get(sourceLocation);
         } else {
-            // Using a plain array is _very slightly_ slower.
-            //const index = this._breakpoints.push(false) - 1;
-
-            const index = this._breakpoints.length;
-            this._breakpoints = extendInts(this._breakpoints);
-            this._breakpointSequences = extendInts(this._breakpointSequences);
-            this._breakpointSequences[index] = -1;
+            const index = this._activeBreakpoints.length;
+            this._activeBreakpoints = extendInts(this._activeBreakpoints);
+            this._sequenceIndexes = extendInts(this._sequenceIndexes);
+            this._sequenceIndexes[index] = -1;
 
             nodes.set(sourceLocation, index);
             return index;
@@ -375,10 +372,10 @@ class Instance {
     _registerSequence(sourceLocations) {
         const indexes = sourceLocations.map((loc) => this._breakpointIndex(loc));
         const sequence = this._sequences.push(indexes) - 1;
-        this._sequencesActive = extendInts(this._sequencesActive);
+        this._activeSequences = extendInts(this._activeSequences);
         for (let loc of sourceLocations) {
             const index = this._breakpointIndex(loc);
-            this._breakpointSequences[index] = sequence;
+            this._sequenceIndexes[index] = sequence;
         }
         return sequence;
     }
@@ -696,10 +693,10 @@ class Compiler {
                     ? `let ${compiler.localInits(paramNames).join(`, `)};`
                     : ``
                 }
-                let spill;
+                let node;
                 ${instance._debug ? `
-                    const breakpoints = instance._breakpoints;
-                    const sequencesActive = instance._sequencesActive;
+                    const activeBreakpoints = instance._activeBreakpoints;
+                    const activeSequences = instance._activeSequences;
                     const stackSpill = [${
                         Array.from(range(compiler.maxDepth + 1), (_, depth) => {
                             return `
@@ -712,14 +709,14 @@ class Compiler {
                     const frame = new ${compiler.enclose(Frame)}(instance);
                     frame.name = ${compiler.literal(name)};
                     ${instance._debug ? `
-                        frame.stack = stackSpill[spill.depth]();
+                        frame.stack = stackSpill[node.depth]();
                         frame.locals = [${compiler.localVars().join(`, `)}];
                     ` : ``}
-                    frame.sourceLocation = spill.sourceLocation;
+                    frame.sourceLocation = node.sourceLocation;
                     return frame;
                 };
+                instance._stackTracers.push(dump);
                 try {
-                    instance._stackTracers.push(dump);
                     ${body}
                     ${hasResult ? `return ${compiler.pop()};` : ``}
                 } finally {
@@ -765,7 +762,7 @@ class Compiler {
         // as is instance._singleStep
         const dirtyPath = (node) => `
             ${node.infallible ? `` : node.spill}
-            if (instance._singleStep | breakpoints[${this.instance._breakpointIndex(node.sourceLocation)}]) {
+            if (instance._singleStep | activeBreakpoints[${this.instance._breakpointIndex(node.sourceLocation)}]) {
                 ${node.infallible ? node.spill : ``}
                 await instance.debugger();
             }
@@ -776,7 +773,7 @@ class Compiler {
                 nodes.map((node) => node.sourceLocation)
             );
             return `
-                if (instance._singleStep | sequencesActive[${sequence}]) {
+                if (instance._singleStep | activeSequences[${sequence}]) {
                     ${nodes.map(dirtyPath).join('\n')}
                 } else {
                     ${nodes.map(cleanPath).join('\n')}
@@ -845,11 +842,14 @@ class Compiler {
         // function instead of live objects, so we can reconstitute source.
         // object literals should be avoided so we only have to do a single
         // property store on this code path
+        const node = {
+            sourceLocation: expr.sourceLocation
+        };
+        if (this.instance._debug) {
+            node.depth = this.literal(this.stack.length);
+        }
         return `
-                spill = ${this.enclose({
-                    sourceLocation: expr.sourceLocation,
-                    depth: this.literal(this.stack.length)
-                })};
+                node = ${this.enclose(node)};
         `;
     }
 
@@ -1171,7 +1171,7 @@ class Compiler {
 
     _compileBinary(expr) {
         return this.opcode(expr, [expr.left, expr.right], (result, left, right) => `
-            ${result} = ${this.binaryOp(expr.op, left, right)}
+            ${result} = ${this.binaryOp(expr.op, left, right)};
         `);
     }
 

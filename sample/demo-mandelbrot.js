@@ -54,17 +54,15 @@ const imports = {
         }
     }
 
-    await test('Native sync execution', async () => {
+    async function native() {
         const {instance} = await WebAssembly.instantiate(wasm, imports);
         return instance;
-    });
+    }
 
-
-    await test('Interpreted async execution', async () => {
+    async function optimized() {
         const {instance} = await Interpreter.instantiate(wasm, imports);
         return instance;
-    });
-
+    }
 
     async function debug() {
         const {instance} = await Interpreter.instantiate(wasm, imports, {
@@ -72,9 +70,14 @@ const imports = {
         });
         return instance;
     }
-    await test('Debuggable async execution', async () => {
-        return await debug();
-    });
+
+    await test('Native sync execution', native);
+
+
+    await test('Optimized async execution', optimized);
+
+
+    await test('Debuggable async execution', debug);
 
 
     let counted = 0;
@@ -83,7 +86,7 @@ const imports = {
         const instance = await debug();
 
         // hack to find a live breakpoint
-        const nodes = Array.from(instance._breakpointNodes.keys());
+        const nodes = Array.from(instance._breakpointIndexes.keys());
         breakpoint = nodes[Math.round((nodes.length - 1) / 2)];
 
         instance.debugger = async () => {
@@ -114,9 +117,16 @@ const imports = {
     const source = path.join(__dirname, 'compiled-mandelbrot.js');
     fs.writeFileSync(
         source,
-        (await debug()).exports.iterate_mandelbrot.toString()
+        (await optimized()).exports.iterate_mandelbrot.toString()
     );
     console.log(`wrote source to ${source}`);
+
+    const sourceDebug = path.join(__dirname, 'compiled-mandelbrot-debug.js');
+    fs.writeFileSync(
+        sourceDebug,
+        (await debug()).exports.iterate_mandelbrot.toString()
+    );
+    console.log(`wrote source to ${sourceDebug}`);
 
 
     console.log('done.');
