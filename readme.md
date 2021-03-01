@@ -16,6 +16,8 @@ The API surface is roughly the same as the `WebAssembly` JS API, and in fact `In
 
 Note that this means you can use the same imports for both native `WebAssembly.instantiate` and `Interpreter.insantiate` if they are all synchronous functions -- BUT if your imports call back into any export functions, they must be prepared to deal with that being asynchronous. This means you probably can't take an existing JavaScript runtime that's not designed for use with this and just stick it on the interpreter.
 
+Note that the API surface may change a bit to accomodate pre-compiling Module objects into source code that can be loaded up from separate server-side compilation.
+
 ```js
 const {Interpreter} = require('terok-nor');
 
@@ -39,26 +41,41 @@ const {Interpreter} = require('terok-nor');
     const native = await WebAssembly.instantiate(wasm, imports);
     native.instance.exports.do_stuff();
 
-    // Interpreted async execution
-    const interp = await Interpreter.instantiate(wasm, imports);
-    await interp.instance.exports.do_stuff();
-
+    // Recompiled async execution
+    const {instance} = await Interpreter.instantiate(wasm, imports);
+    await instance.exports.do_stuff();
 
     // Again, but with a debug hook
-    async function delay(ms) {
-        await new Promise((resolve, reject) => {
-            setTimeout(resolve, ms);
-        });
-    }
-    interp.instance.callback = async (frame) => {
+    instance.singleStep = true;
+    let first = true;
+    instance.debugger = async function() {
         // You can arbitrarily pause or delay execution.
-        // This slows execution to one opcode per 50ms!
-        await delay(50);
+        // This slows execution and dumps stack frames on
+        // every breakpoint hit.
+        if (!first) {
+            first = false;
+            await new Promise((resolve, reject) => {
+                setTimeout(resolve, 250);
+            });
+        }
+        const [frame] = instance.stackTrace(-1);
+        console.log(frame.sourceLocation);
     };
-    await interp.instance.exports.do_stuff();
+    await instance.exports.do_stuff();
+
+    // Or set some breakpoints
+    // @fixme breakpoints are incomplete right now
+    //
+    // they work well but the location IDs are the in-memory
+    // references of the AST nodes in the parser.
+    // This will be changed to support sensible source locations,
+    // and to provide disassembly for modules with no debug info.
+    instance.singleStep = false;
+    instance.setBreakpoint('foobar.c:234');
+    await instance.exports.do_stuff();
 
 
-    // You could use this to implement breakpoints
+    // You could use this to implement a debugger UI
     class DebugAbort extends Error {
         constructor() {
             super("Debug abort");
@@ -72,42 +89,38 @@ const {Interpreter} = require('terok-nor');
         continueButton.click = null;
         abortButton.disabled = true;
         abortButton.click = null;
-        interp.instance.callback = async (frame) => {
+        instance.debugger = async () => {
             throw new DebugAbort();
         };
     }
     abortButton.click = abortHandler;
     continueButton.disabled = true;
-    interp.instance.callback = async (frame) => {
-        // A Set of source nodes (APIs not yet complete) could be compared
-        // for implementation of breakpoints at a lower cost than full
-        // debug funsies
-        if (breakpoints.has(frame.node)) {
-            await new Promise((resolve, reject) => {
-                continueButton.click = () => {
-                    continueButton.disabled = true;
-                    continueButton.click = null;
-                    resolve();
-                };
-                continueButton.disabled = false;
+    instance.debugger = async () => {
+        await new Promise((resolve, reject) => {
+            continueButton.click = () => {
+                continueButton.disabled = true;
+                continueButton.click = null;
+                resolve();
+            };
+            continueButton.disabled = false;
 
-                abortButton.click = () => {
-                    abortHandler();
-                    reject(new DebugAbort());
-                };
+            abortButton.click = () => {
+                abortHandler();
+                reject(new DebugAbort());
+            };
 
-                // Stack and locals are dumped for your introspection pleasure.
-                // This causes some slowdown, as the array is constructed on demand.
-                // If you do not use them, the performance cost is lower.
-                console.log('stack', frame.stack);
-                console.log('locals', frame.locals);
-
-                // API for the source node is not yet complete.
-                console.log('AST node', frame.node);
-            });
-        }
+            // Stack and locals can be dumped for your introspection pleasure.
+            // This causes some slowdown, as the array is constructed on demand
+            // from closure state when you call `stackTrace()`.
+            //
+            // If you only need the top frame, ask for it using `slice`-style args:
+            let [frame] = instance.stackTrace(-1);
+            console.log('stack', frame.stack);
+            console.log('locals', frame.locals);
+            console.log('source location', frame.sourceLocation);
+        });
     };
-    await interp.instance.exports.do_stuff();
+    await instance.exports.do_stuff();
 })();
 ```
 
@@ -130,29 +143,35 @@ Non-goals:
 
 # Implementation notes
 
-Initial implementation is using binaryen's JS API to load the module and walk through functions etc, as well as to create a runtime ops module which implements the unary, binary, load, and store operations through actual WebAssembly functions.
+Initial implementation is using binaryen's JS API to load the module and walk through functions etc, compiling into JavaScript async function source code which is then instantiated. The compiler and runtime are currently a bit intertwined, but these will be separated to allow precompiling `Module` subclass implementations that can be instantiated with a minimal runtime.
 
 This is a great way to get started, but has several downsides:
 * the dependency is large and includes optimizing compiler stages we don't need
 * there's no byte-position information about each instruction, so you can't hook it up to source-level debugging that depends on mapping the WebAssembly binary to a source location
 
-If it's worth pursuing this project, a custom JS-based WebAssembly parser would probably be a good investment. The ops module can be built as a dev dependency, so we just need to walk through the module and produce a suitable AST with exactly the information needed for execution and debugging in a format that's efficient to do it with.
+If it's worth pursuing this project with client-side compilation, a custom JS-based WebAssembly parser would probably be a good investment. This would have to validate the module's structure and stack behavior to ensure safe compilation.
 
-Each function is compiled via JavaScript source into an async function which maintains VM state for the frame (locals, stack, and a pointer to the AST node). JavaScript control structures are used to implement blocks, branches and loops; most other opcodes call into a stub WebAssembly module per opcode, while a few are implemented directly in JavaScript where the semantics are clear. The stack is kept virtually in local variables, as are the Wasm locals; when a debug callback is attached they are spilled into arrays for introspection.
+Each function is compiled via JavaScript source into an async function which maintains VM state for the frame: locals, stack, and (for debug mode) the source locations of each node). JavaScript control structures are used to implement blocks, branches and loops; opcodes are implemented directly as JS operations when possible, or by annoying polyfills when necessary. The stack is kept virtually in local variables, as are the Wasm locals; when a debug callback is attached they are spilled into arrays for introspection.
 
-Single-stepping is possible by specifying a callback as an async function, and simply not returning until you're done. Each input opcode invokes the callback if it's provided, with the current execution frame state. Set the function on `instance.callback`, and set back to null to disable.
+Single-stepping is possible by setting `instance.singleStep = true` and specifying an async callback on `instance.debugger`. When you're ready to proceed, return from the callback. To be called only on specific breakpoints, use `instance.setBreakpoint(location)`. Currently the source location IDs are the in-Wasm-memory pointers of the expression nodes in binaryen.js which is .... not good. ;)
 
-Clean APIs for debugging introspection have not yet been devised. All APIs are to be considered unstable.
+These will be made more usable later, hopefully with support for automatic disassembly generation and source refs via DWARF debugging info.
+
+You can get a stack trace of stack `Frame` objects by calling `instance.stackTrace()`; it accepts start and end parameters in the style of `Array.prototype.slice` so you can optionally ask for a subset of the stack.
+
+Currently these APIs are incomplete and not stable.
 
 # Limitations
 
 No shared memory or SIMD or other non-MVP features are supported yet.
 
-Floating point types may not preserve NaN bit patterns due to JavaScript's canonicalizations, so code using NaN-boxing or other fancy techniques will have trouble.
+Floating point types may not preserve NaN bit patterns due to JavaScript's canonicalizations, so code using NaN-boxing or other fancy techniques could have trouble.
 
 Eval permissions are required to create new code with the Function constructor. If it's required to deploy in an environment with eval disabled, something would have to be rigged up to provide the JS source separately (server-side compilation) and fill it with the appropriate closure state at runtime.
 
 Nothing is hardened against re-entrancy; if you call into a second function while another one is running and in progress it might work, or it might cause problems.
+
+`i64` operations are very slow, going through `BigInt` which means heap allocation for every temporary value.
 
 # Debugger plans
 

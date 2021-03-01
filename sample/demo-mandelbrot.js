@@ -119,7 +119,12 @@ const imports = {
         console.log(`Hit breakpoint ${counted} times on ${breakpoint}!`);
     });
 
-    
+    async function delay(ms) {
+        await new Promise((resolve, reject) => {
+            setTimeout(resolve, ms);
+        });
+    }
+
     counted = 0;
     await test('Debuggable async execution with a single-step hook', async () => {
         const instance = await debug();
