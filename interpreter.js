@@ -6,8 +6,6 @@ const Memory = WebAssembly.Memory;
 
 const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
 
-const fastMemory = true;
-
 /// Clone of WebAssembly.Table that lets us store JS async functions
 class Table {
     constructor({element, initial, maximum=undefined}) {
@@ -187,9 +185,10 @@ class Instance {
                 throw new Error('Currently requires a memory');
             }
 
-            // Now that we have memory, create the ops module
-            // This implements unary, binary, and load/store ops via sync WebAssembly
-            this._ops = buildOpsModule(this._memory);
+            // Create the ops module
+            // This implements unary and binary ops via sync WebAssembly
+            // @todo remove this
+            this._ops = buildOpsModule();
 
             const evaluateConstant = async (expr) => {
                 const func = Compiler.compileExpression(this, expr);
@@ -1137,7 +1136,8 @@ class Compiler {
         switch (type) {
             case b.i32:
             case b.i64:
-                method = `${signed ? 'getInt' : 'getUint'}${bits}`;
+                const big = (type === b.i64) ? `Big` : ``;
+                method = signed ? `get${big}Int${bits}` : `get${big}Uint${bits}`;
                 let call = `dataView.${method}(${offset}, true)`;
                 if (type === b.i64 && bits < 64) {
                     return `BigInt(${call})`
@@ -1162,7 +1162,8 @@ class Compiler {
         switch (type) {
             case b.i32:
             case b.i64:
-                method = `setInt${bits}`;
+                const big = (type === b.i64) ? `Big` : ``;
+                method = `set${big}Int${bits}`;
                 let input;
                 if (type === b.i64 && bits < 64) {
                     input = `Number(BigInt.asIntN(${bits}, ${input}))`
@@ -1182,37 +1183,15 @@ class Compiler {
     }
 
     _compileLoad(expr) {
-        if (fastMemory) {
-            // @fixme this faster path using typed arrays for aligned is nice
-            // but it won't trap on out of bounds, it'll silently fail
-            return this.opcode(expr, [expr.ptr], (result, ptr) =>
-                `${result} = ${this.memoryLoad(expr, ptr)};`
-            );
-        } else {
-            // Slow path using function calls into Wasm
-            const signed = expr.isSigned ? 'signed' : 'unsigned';
-            const func = this.instance._ops.memory.load[expr.type][expr.bytes << 3][signed];
-            const offset = expr.offset ? ` + ${expr.offset}` : ``;
-            return this.opcode(expr, [expr.ptr], (result, ptr) =>
-                `${result} = /* unaligned load */ ${this.enclose(func)}(${ptr}${offset});`
-            );
-        }
+        return this.opcode(expr, [expr.ptr], (result, ptr) =>
+            `${result} = ${this.memoryLoad(expr, ptr)};`
+        );
     }
 
     _compileStore(expr) {
-        if (fastMemory) {
-            return this.opcode(expr, [expr.ptr, expr.value], (_result, ptr, value) =>
-                `${this.memoryStore(expr, ptr, value)};`
-            );
-        } else {
-            // Slow path using function calls into Wasm
-            const valueInfo = getExpressionInfo(expr.value);
-            const func = this.instance._ops.memory.store[valueInfo.type][expr.bytes << 3];
-            const offset = expr.offset ? ` + ${expr.offset}` : ``;
-            return this.opcode(expr, [expr.ptr, expr.value], (_result, ptr, value) =>
-                `/* unaligned store */ ${this.enclose(func)}(${ptr}${offset}, ${value});`
-            );
-        }
+        return this.opcode(expr, [expr.ptr, expr.value], (_result, ptr, value) =>
+            `${this.memoryStore(expr, ptr, value)};`
+        );
     }
 
     _compileConst(expr) {
@@ -1268,36 +1247,55 @@ class Compiler {
         switch (op) {
             case b.AddInt32:
                 return `${left} + ${right} | 0`;
+            case b.AddInt64:
+                return `BigInt.asIntN(64, ${left} + ${right})`;
             case b.AddFloat32:
                 return `${this.enclose(Math.fround)}(${left} + ${right})`;
             case b.AddFloat64:
                 return `${left} + ${right}`;
             case b.SubInt32:
                 return `${left} - ${right} | 0`;
+            case b.SubInt64:
+                return `BigInt.asIntN(64, ${left} - ${right})`;
             case b.SubFloat32:
                 return `${this.enclose(Math.fround)}(${left} - ${right})`;
             case b.SubFloat64:
                 return `${left} - ${right}`;
+            case b.MulInt32:
+                return `Math.imul(${left}, ${right})`;
+            case b.MulInt64:
+                return `BigInt.asIntN(64, ${left} * ${right})`;
             case b.MulFloat32:
                 return `${this.enclose(Math.fround)}(${left} * ${right})`;
             case b.MulFloat64:
                 return `${left} * ${right}`;
+            case b.DivInt32:
+                return `(${left} / ${right}) | 0`;
+            case b.DivInt64:
+                return `${left} / ${right}`;
             case b.DivFloat32:
                 return `${this.enclose(Math.fround)}(${left} / ${right})`;
             case b.DivFloat64:
                 return `${left} / ${right}`;
             case b.AndInt32:
+            case b.AndInt64:
                 return `${left} & ${right}`;
             case b.OrInt32:
+            case b.OrInt64:
                 return `${left} | ${right}`;
             case b.XorInt32:
+            case b.XorInt64:
                 return `${left} ^ ${right}`;
             case b.ShlInt32:
                 return `${left} << ${right}`;
+            case b.ShlInt64:
+                return `BigInt.asIntN(64, ${left} << (${right} & 63n))`;
             case b.ShrSInt32:
                 return `${left} >> ${right}`;
             case b.ShrUInt32:
                 return `(${left} >>> ${right}) | 0`;
+            case b.ShrUInt64:
+                return `BigInt.asIntN(64, BigInt.asUintN(64, ${left}) >>> (${right} & 63n)))`;
             case b.EqInt32:
             case b.EqInt64:
                 return `(${left} === ${right}) | 0`;
@@ -1392,9 +1390,8 @@ class Compiler {
     }
 }
 
-function buildOpsModule(memory) {
+function buildOpsModule() {
     const m = b.parseText("(module)");
-    m.addMemoryImport("memory", "env", "memory");
 
     const promote = (expr, type) => {
         if (type == b.f32) {
@@ -1564,58 +1561,13 @@ function buildOpsModule(memory) {
         m.addFunction(name, params, adapt(result), [], promote(body, result));
         m.addFunctionExport(name, name);
     }
-
-    const loadOps = [
-        ['i32_load8_s', m.i32.load8_s, b.i32],
-        ['i32_load8_u', m.i32.load8_u, b.i32],
-        ['i32_load16_s', m.i32.load16_s, b.i32],
-        ['i32_load16_u', m.i32.load16_u, b.i32],
-        ['i32_load', m.i32.load, b.i32],
-        ['i64_load8_s', m.i64.load8_s, b.i64],
-        ['i64_load8_u', m.i64.load8_u, b.i64],
-        ['i64_load16_s', m.i64.load16_s, b.i64],
-        ['i64_load16_u', m.i64.load16_u, b.i64],
-        ['i64_load32_s', m.i64.load32_s, b.i64],
-        ['i64_load32_u', m.i64.load32_u, b.i64],
-        ['i64_load', m.i64.load, b.i64],
-        ['f32_load', m.f32.load, b.f32],
-        ['f64_load', m.f64.load, b.f64]
-    ];
-    for (let [name, builder, result] of loadOps) {
-        const params = b.createType([b.i32]);
-        const arg = m.local.get(0);
-        const body = builder(0, 1, arg);
-        m.addFunction(name, params, adapt(result), [], promote(body, result));
-        m.addFunctionExport(name, name);
-    }
-
-    const storeOps = [
-        ['i32_store8', m.i32.store8, b.i32],
-        ['i32_store16', m.i32.store16, b.i32],
-        ['i32_store', m.i32.store, b.i32],
-        ['i64_store8', m.i64.store8, b.i64],
-        ['i64_store16', m.i64.store16, b.i64],
-        ['i64_store32', m.i64.store32, b.i64],
-        ['i64_store', m.i64.store, b.i64],
-        ['f32_store', m.f32.store, b.f32],
-        ['f64_store', m.f64.store, b.f64]
-    ];
-    for (let [name, builder, operand] of storeOps) {
-        const params = b.createType([b.i32, adapt(operand)]);
-        const ptr = m.local.get(0);
-        const value = m.local.get(1);
-        const body = builder(0, 1, ptr, demote(value, operand));
-        m.addFunction(name, params, b.none, [], body);
-        m.addFunctionExport(name, name);
-    }
-
     const bytes = m.emitBinary();
     //console.log(m.emitText());
 
     const wasm = new WebAssembly.Module(bytes);
     const instance = new WebAssembly.Instance(wasm, {
         env: {
-            memory
+            //
         }
     });
     const exports = instance.exports;
@@ -1632,47 +1584,8 @@ function buildOpsModule(memory) {
     }
     return {
         unary: opArray('unary', unaryOps),
-        binary: opArray('binary', binaryOps),
-        memory: buildMemoryOps(exports)
+        binary: opArray('binary', binaryOps)
     };
-}
-
-function buildMemoryOps(ops) {
-    const map = {};
-    const subops = ['load', 'store'];
-    for (let op of subops) {
-        const opMap = {};
-        opMap[b.i32] = buildMemoryOpsMap(ops, op, 'i', 32, [16, 8]);
-        opMap[b.i64] = buildMemoryOpsMap(ops, op, 'i', 64, [32, 16, 8]);
-        opMap[b.f32] = buildMemoryOpsMap(ops, op, 'f', 32);
-        opMap[b.f64] = buildMemoryOpsMap(ops, op, 'f', 64);
-        map[op] = opMap;
-    }
-    return map;
-}
-
-function buildMemoryOpsMap(ops, op, type, size, subSizes=[]) {
-    let func = type + size + '_' + op;
-    const map = {};
-    if (op === 'load') {
-        map[size] = {
-            signed: ops[func],
-            unsigned: ops[func]
-        };
-    } else {
-        map[size] = ops[func];
-    }
-    for (let sub of subSizes) {
-        if (op === 'load') {
-            map[sub] = {
-                signed: ops[func + sub + '_s'],
-                unsigned: ops[func + sub + '_u']
-            };
-        } else {
-            map[sub] = ops[func + sub];
-        }
-    }
-    return map;
 }
 
 /// Base object for the Interpreter API. Modeled after WebAssembly's base object,

@@ -26,7 +26,12 @@ const imports = {
             await instance.exports.process_i8();
             await instance.exports.process_i16();
             await instance.exports.process_i32();
-            //await instance.exports.process_i64(); // bignum integration is not deployed yet on v8
+            if (instance instanceof WebAssembly.Instance) {
+                // skip i64
+                // bignum integration is not deployed yet on v8
+            } else {
+                await instance.exports.process_i64();
+            }
             await instance.exports.process_f32();
             await instance.exports.process_f64();
 
