@@ -763,9 +763,12 @@ class Compiler {
             ${node.infallible ? `` : node.spill}
             ${node.fragment}
         `;
+        // Note the use of | rather than || -- actually runs faster in node
+        // Values from breakpoint are guaranteed to be 0 or 1
+        // while instance._singleStep is a boolean
         const dirtyPath = (node) => `
             ${node.infallible ? `` : node.spill}
-            if (instance._singleStep || (instance._breakpointsActive && breakpoints[${this.instance._breakpointIndex(node.sourceLocation)}])) {
+            if (instance._singleStep | breakpoints[${this.instance._breakpointIndex(node.sourceLocation)}]) {
                 ${node.infallible ? node.spill : ``}
                 await instance.debugger();
             }
