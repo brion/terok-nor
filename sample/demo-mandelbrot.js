@@ -65,7 +65,8 @@ const imports = {
     debug.instance.singleStep = false;
 
     console.log('Debuggable async execution with a breakpoint:');
-    const breakpoint = '5581904';
+    //const breakpoint = '5581904';
+    const breakpoint = 'fake_location';
     debug.instance.debugger = async () => {
         //console.log('breakpoint reached');
         //const frame = debug.instance.stackTrace(0, 1);
