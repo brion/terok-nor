@@ -1295,7 +1295,7 @@ class Compiler {
             case b.ShrUInt32:
                 return `(${left} >>> ${right}) | 0`;
             case b.ShrUInt64:
-                return `BigInt.asIntN(64, BigInt.asUintN(64, ${left}) >>> (${right} & 63n)))`;
+                return `BigInt.asIntN(64, BigInt.asUintN(64, ${left}) >> (${right} & 63n)))`;
             case b.EqInt32:
             case b.EqInt64:
                 return `(${left} === ${right}) | 0`;
