@@ -117,7 +117,7 @@ class Instance {
         // For debugging support
         this._debug = module._debug;
         this._interrupt = false;
-        this._singleStep = false;
+        this._singleStep = 0;
         this._breakpoints = new Uint8Array();
         this._breakpointsActive = 0;
         this._breakpointNodes = new Map();
@@ -342,16 +342,16 @@ class Instance {
     }
 
     get singleStep() {
-        return this._singleStep;
+        return Boolean(this._singleStep);
     }
 
     set singleStep(val) {
-        this._singleStep = Boolean(val);
+        this._singleStep = val ? 1 : 0;
         this._updateInterrupt();
     }
 
     _updateInterrupt() {
-        this._interrupt = this._singleStep || Boolean(this._breakpointsActive);
+        this._interrupt = Boolean(this._singleStep || this._breakpointsActive);
     }
 
     _breakpointIndex(sourceLocation) {
@@ -765,7 +765,7 @@ class Compiler {
         `;
         // Note the use of | rather than || -- actually runs faster in node
         // Values from breakpoint are guaranteed to be 0 or 1
-        // while instance._singleStep is a boolean
+        // as is instance._singleStep
         const dirtyPath = (node) => `
             ${node.infallible ? `` : node.spill}
             if (instance._singleStep | breakpoints[${this.instance._breakpointIndex(node.sourceLocation)}]) {
