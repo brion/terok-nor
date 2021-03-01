@@ -137,6 +137,7 @@ class Instance {
         this._mod = module._mod;
         this._globals = {};
         this._funcs = {};
+        this._functionNames = new Map();
 
         // @todo support multiples
         this._memory = null;
@@ -250,6 +251,7 @@ class Instance {
                     }
                 }
                 this._funcs[func.name] = thunk;
+                this._functionNames.set(thunk, func.name);
             }
 
             // Function table
@@ -1093,8 +1095,9 @@ class Compiler {
 
     _compileCall(expr) {
         const func = this.instance._funcs[expr.target];
+        const name = this.instance._functionNames.get(func);
         return this.opcode(expr, expr.operands, (result, ...args) => {
-            const call = `await /* func.name */ ${this.enclose(func)}(${args.join(', ')})`;
+            const call = `await /* ${name} */ ${this.enclose(func)}(${args.join(', ')})`;
             return result
                     ? `${result} = ${call};`
                     : `${call};`;
@@ -1176,7 +1179,7 @@ class Compiler {
                 throw new Error('bad type');
         }
         const offset = expr.offset ? ` + ${expr.offset}` : ``;
-        return `views.${view}[${addr}${offset}]`;
+        return `${view}[${addr}${offset}]`;
     }
 
     _compileLoad(expr) {
@@ -1585,22 +1588,6 @@ function buildOpsModule(memory) {
             memory
         }
     });
-    /*
-    const exports = {};
-    for (const [name, item] of Object.entries(instance.exports)) {
-        if (item instanceof Function) {
-            exports[name] = (...args) => {
-                try {
-                    return item(...args);
-                } catch (e) {
-                    console.log(`${name} is what died`);
-                    throw e;
-                }
-            }
-            exports[name].opname = name;
-        }
-    }
-    */
     const exports = instance.exports;
 
     function maxOp(list) {
