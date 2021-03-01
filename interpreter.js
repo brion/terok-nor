@@ -733,7 +733,7 @@ class Compiler {
         const closureNames = compiler.closure.map((_val, index) => `closure${index}`);
         const args = closureNames.concat([func]);
         //console.log({closureNames, closure: compiler.closure})
-        console.log(func);
+        //console.log(func);
         return Reflect.construct(Function, args).apply(null, compiler.closure);
     }
 
@@ -772,7 +772,7 @@ class Compiler {
                 ${node.infallible ? node.spill : ``}
                 await instance.debugger();
             }
-            ${console.log({node}),node.fragment}
+            ${node.fragment}
         `;
         const bifurcate = (nodes) => `
             if (instance._interrupt) {

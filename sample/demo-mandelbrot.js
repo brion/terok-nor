@@ -16,6 +16,11 @@ const imports = {
         var cols = 72, rows = 24;
         var maxIters = 1000;
 
+        // Give some warmup time for the function
+        for (let i = 0; i < 20; i++) {
+            await instance.exports.iterate_mandelbrot(0, 0, maxIters);
+        }
+
         const start = Date.now();
         for (var row = 0; row < rows; row++) {
             var y = (row / rows) * (y1 - y0) + y0;
