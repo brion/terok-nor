@@ -186,7 +186,7 @@ class Instance {
             }
 
             // Create the ops module
-            // This implements unary and binary ops via sync WebAssembly
+            // This implements some binary ops via sync WebAssembly
             // @todo remove this
             this._ops = buildOpsModule();
 
@@ -711,6 +711,75 @@ function uninterruptible(expr) {
     }
 }
 
+// move these into generated code
+
+// Borrowed from https://developer.mozilla.org/en-US/docs/Web/JavaScript/Reference/Global_Objects/Math/clz32
+function ctz32(n){
+    n |= n << 16;
+    n |= n << 8;
+    n |= n << 4;
+    n |= n << 2;
+    n |= n << 1;
+    return 32 - Math.clz(~n);
+}
+
+function ctz64(n) {
+    n |= n << 32n;
+    n |= n << 16n;
+    n |= n << 8n;
+    n |= n << 4n;
+    n |= n << 2n;
+    n |= n << 1;
+    const low = BigInt.toIntN(32, n);
+    const trailing = 32 - Math.clz(~low);
+    if (trailing == 32) {
+        const high = Number(BigInt.toIntN(32, n >> 32n));
+        return 64 - Math.clz(~high);
+    }
+}
+
+function clz64(n) {
+    const high = Number(BigInt.toIntN(32, n >> 32n));
+    const leading = Math.clz32(high);
+    if (leading === 32) {
+        const low = Number(BigInt.toIntN(32, n));
+        return 32 + Math.clz32(low);
+    } else {
+        return leading;
+    }
+}
+
+const bitsPerByte = new Uint8Array(Array.from(range(256)).map((n) => {
+    let bits = 0;
+    bits += (n & 1) | 0;
+    bits += (n & 2) >> 1 | 0;
+    bits += (n & 4) >> 2 | 0;
+    bits += (n & 8) >> 3 | 0;
+    bits += (n & 16) >> 4 | 0;
+    bits += (n & 32) >> 5 | 0;
+    bits += (n & 64) >> 6 | 0;
+    bits += (n & 128) >> 7 | 0;
+    return bits;
+}));
+
+function popcnt32(n) {
+    return bitsPerByte[n & 0xff] +
+        bitsPerByte[(n >> 8) & 0xff] +
+        bitsPerByte[(n >> 16) & 0xff] +
+        bitsPerByte[(n >> 24) & 0xff];
+}
+
+function popcnt64(n) {
+    const high = Number(BigInt.toIntN(32, n >> 32n));
+    const low = Number(BigInt.toIntN(32, n));
+    return popcnt32(high) + popcnt32(low);
+}
+
+// move this into instance state maybe?
+const reinterpretBuffer = new ArrayBuffer(8);
+const reinterpretView = new DataView(reinterpretBuffer);
+
+
 class Compiler {
     constructor(instance, params=[], vars=[]) {
         this.instance = instance;
@@ -736,10 +805,10 @@ class Compiler {
                 const table = instance._table;
                 const memory = instance._memory;
                 let buffer = memory.buffer;
-                let dataView = new DataView(buffer);
+                let dataView = new DataView(buffer); // @fixme use a common one to avoid allocating
                 const updateViews = () => {
                     buffer = memory.buffer;
-                    dataView = new DataView(buffer);
+                    dataView = new DataView(buffer); // @fixme run this through a common cache
                 };
                 ${
                     compiler.maxDepth
@@ -1209,12 +1278,75 @@ class Compiler {
     
     unaryOp(op, operand) {
         switch (op) {
-        case b.EqZInt32:
-        case b.EqZInt64:
-            return `!${operand} | 0`;
+        case b.ClzInt32:
+            return `Math.clz32(${operand})`;
+        case b.ClzInt64:
+            return `/* clz64 */ ${this.enclose(clz64)}(${operand})`
+        case b.CtzInt32:
+            return `/* ctz32 */ ${this.enclose(ctz32)}(${operand})`;
+        case b.CtzInt64:
+            return `/* ctz64 */ ${this.enclose(ctz64)}(${operand})`;
+        case b.PopcntInt32:
+            return `/* popcnt32 */ ${this.enclose(popcnt32)}(${operand})`;
+        case b.PopcntInt64:
+            return `/* popcnt64 */ ${this.enclose(popcnt64)}(${operand})`;
         case b.NegFloat32:
         case b.NegFloat64:
             return `-${operand}`;
+        case b.AbsFloat32:
+        case b.AbsFloat64:
+            return `Math.abs(${operand})`;
+        case b.CeilFloat32:
+        case b.CeilFloat64:
+            return `Math.ceil(${operand})`;
+        case b.FloorFloat32:
+        case b.FloorFloat64:
+            return `Math.floor(${operand})`;
+        case b.TruncFloat32:
+        case b.TruncFloat64:
+            return `Math.trunc(${operand})`;
+        case b.NearestFloat32:
+        case b.NearestFloat64:
+            return `Math.round(${operand})`;
+        case b.SqrtFloat32:
+            return `Math.fround(Math.sqrt(${operand}))`;
+        case b.SqrtFloat64:
+            return `Math.sqrt(${operand})`;
+        case b.EqZInt32:
+        case b.EqZInt64:
+            return `!${operand} | 0`;
+        case b.TruncSFloat32ToInt32:
+        case b.TruncSFloat64ToInt32:
+            // @fixme this should throw when out of range or NaN
+            return `${operand} | 0`;
+        case b.TruncUFloat32ToInt32:
+        case b.TruncUFloat64ToInt32:
+            // @fixme this should throw when out of range or NaN
+            return `$({operand} >>> 0) | 0`;
+        case b.TruncSFloat32ToInt64:
+        case b.TruncSFloat64ToInt64:
+            // @fixme this should throw when out of range or NaN
+            return `BigInt.toIntN(64, BigInt(${operand}))`;
+        case b.TruncUFloat32ToInt64:
+        case b.TruncUFloat64ToInt64:
+            // @fixme this should throw when out of range or NaN
+            return `BigInt.toIntN(64, BigInt(${operand}))`;
+        case b.ReinterpretFloat32:
+            {
+                const view = this.enclose(reinterpretView);
+                return `/* reinterpret */
+                    ${view}.setFloat32(0, ${operand}, true),
+                    ${view}.getInt32(0, true)
+                `;
+            }
+        case b.ReinterpretFloat64:
+            {
+                const view = this.enclose(reinterpretView);
+                return `/* reinterpret */
+                    ${view}.setFloat64(0, ${operand}, true),
+                    ${view}.getBigInt64(0, true)
+                `;
+            }
         case b.ConvertSInt32ToFloat32:
             return `${this.enclose(Math.fround)}(+${operand})`;
         case b.ConvertSInt32ToFloat64:
@@ -1231,9 +1363,28 @@ class Compiler {
             return `+Number(BigInt.asUintN(64, ${operand}))`;
         case b.ConvertUInt64ToFloat64:
             return `${this.enclose(Math.fround)}(+Number(BigInt.asUintN(64, ${operand})))`;
+        case b.PromoteFloat32:
+            return `${operand}`;
+        case b.DemoteFloat64:
+            return `Math.fround(${operand})`;
+        case b.ReinterpretInt32:
+            {
+                const view = this.enclose(reinterpretView);
+                return `/* reinterpret */
+                    ${view}.setInt32(0, ${operand}, true),
+                    ${view}.getFloat32(0, true)
+                `;
+            }
+        case b.ReinterpretInt64:
+            {
+                const view = this.enclose(reinterpretView);
+                return `/* reinterpret */
+                    ${view}.setInt64(0, ${operand}, true),
+                    ${view}.getFloat64(0, true)
+                `;
+            }
         default:
-            const func = this.instance._ops.unary[op];
-            return `/* unary${op} */ ${this.enclose(func)}(${operand})`;
+            throw new Error('Unknown unary op ${op}');
         }
     }
 
@@ -1412,67 +1563,6 @@ function buildOpsModule() {
         return type;
     };
 
-    const unaryOps = [
-        [b.ClzInt32, m.i32.clz, b.i32, b.i32],
-        [b.ClzInt64, m.i64.clz, b.i64, b.i64],
-        [b.CtzInt32, m.i32.ctz, b.i32, b.i32],
-        [b.CtzInt64, m.i64.ctz, b.i64, b.i64],
-        [b.PopcntInt32, m.i32.popcnt, b.i32, b.i32],
-        [b.PopcntInt64, m.i64.popcnt, b.i64, b.i64],
-    
-        [b.NegFloat32, m.f32.neg, b.f32, b.f32],
-        [b.NegFloat64, m.f64.neg, b.f64, b.f64],
-        [b.AbsFloat32, m.f32.abs, b.f32, b.f32],
-        [b.AbsFloat64, m.f64.abs, b.f64, b.f64],
-        [b.CeilFloat32, m.f32.ceil, b.f32, b.f32],
-        [b.CeilFloat64, m.f64.ceil, b.f64, b.f64],
-        [b.FloorFloat32, m.f32.floor, b.f32, b.f32],
-        [b.FloorFloat64, m.f64.floor, b.f64, b.f64],
-        [b.TruncFloat32, m.f32.trunc, b.f32, b.f32],
-        [b.TruncFloat64, m.f64.trunc, b.f64, b.f64],
-        [b.NearestFloat32, m.f32.nearest, b.f32, b.f32],
-        [b.NearestFloat64, m.f64.nearest, b.f64, b.f64],
-        [b.SqrtFloat32, m.f32.sqrt, b.f32, b.f32],
-        [b.SqrtFloat64, m.f64.sqrt, b.f64, b.f64],
-    
-        [b.EqZInt32, m.i32.eqz, b.i32, b.i32],
-        [b.EqZInt64, m.i64.eqz, b.i32, b.i64],
-    
-        [b.TruncSFloat32ToInt32, m.i32.trunc_s.f32, b.i32, b.f32],
-        [b.TruncSFloat64ToInt32, m.i32.trunc_s.f64, b.i32, b.f64],
-        [b.TruncUFloat32ToInt32, m.i32.trunc_u.f32, b.i32, b.f32],
-        [b.TruncUFloat64ToInt32, m.i32.trunc_u.f64, b.i32, b.f64],
-        [b.TruncSFloat32ToInt64, m.i64.trunc_s.f32, b.i64, b.f32],
-        [b.TruncSFloat64ToInt64, m.i64.trunc_s.f64, b.i64, b.f64],
-        [b.TruncUFloat32ToInt64, m.i64.trunc_u.f32, b.i64, b.f32],
-        [b.TruncUFloat64ToInt64, m.i64.trunc_u.f64, b.i64, b.f64],
-    
-        [b.ReinterpretFloat32, m.i32.reinterpret, b.i32, b.f32],
-        [b.ReinterpretFloat64, m.i64.reinterpret, b.i64, b.f64],
-    
-        [b.ConvertSInt32ToFloat32, m.f32.convert_s.i32, b.f32, b.i32],
-        [b.ConvertSInt32ToFloat64, m.f64.convert_s.i32, b.f64, b.i32],
-        [b.ConvertUInt32ToFloat32, m.f32.convert_u.i32, b.f32, b.i32],
-        [b.ConvertUInt32ToFloat64, m.f64.convert_u.i32, b.f64, b.i32],
-        [b.ConvertSInt64ToFloat32, m.f32.convert_s.i64, b.f32, b.i64],
-        [b.ConvertSInt64ToFloat64, m.f64.convert_s.i64, b.f64, b.i64],
-        [b.ConvertUInt64ToFloat32, m.f32.convert_u.i64, b.f32, b.i64],
-        [b.ConvertUInt64ToFloat64, m.f64.convert_u.i64, b.f64, b.i64],
-    
-        [b.PromoteFloat32, m.f64.promote, b.f64, b.f32],
-        [b.DemoteFloat64, m.f32.demote, b.f32, b.f64],
-        [b.ReinterpretInt32, m.f32.reinterpret, b.f32, b.i32],
-        [b.ReinterpretInt64, m.f64.reinterpret, b.f64, b.i64]
-    ];
-    for (let [op, builder, result, operand] of unaryOps) {
-        const name = "unary" + op;
-        const params = b.createType([adapt(operand)]);
-        const arg = m.local.get(0);
-        const body = builder(demote(arg, operand));
-        m.addFunction(name, params, adapt(result), [], promote(body, result));
-        m.addFunctionExport(name, name);
-    }
-
     const binaryOps = [
         [b.AddInt32, m.i32.add, b.i32, b.i32],
         [b.AddInt64, m.i64.add, b.i64, b.i64],
@@ -1583,7 +1673,6 @@ function buildOpsModule() {
         return ops;
     }
     return {
-        unary: opArray('unary', unaryOps),
         binary: opArray('binary', binaryOps)
     };
 }
