@@ -92,7 +92,7 @@ const imports = {
 
     console.log('done.');
 
-    const source = 'sample/compiled-mandelbrot.js';
+    const source = path.join(__dirname, 'compiled-mandelbrot.js');
     fs.writeFileSync(
         source,
         debug.instance.exports.iterate_mandelbrot.toString()
