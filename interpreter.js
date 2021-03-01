@@ -1225,7 +1225,7 @@ class Compiler {
             value = expr.value;
         }
         return this.opcode(expr, [], (result) => `
-            ${result} = ${this.literal(value)}
+            ${result} = ${this.literal(value)};
         `);
     }
     
