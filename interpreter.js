@@ -6,6 +6,8 @@ const Memory = WebAssembly.Memory;
 
 const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
 
+const fastMemory = true;
+
 /// Clone of WebAssembly.Table that lets us store JS async functions
 class Table {
     constructor({element, initial, maximum=undefined}) {
@@ -1140,9 +1142,9 @@ class Compiler {
     }
 
     _compileLoad(expr) {
-        if (expr.align == expr.bytes) {
+        if (fastMemory && expr.align == expr.bytes) {
             return this.opcode(expr, [expr.ptr], (result, ptr) =>
-                `${result} = ${this.memoryView(expr, ptr)};`
+                `${result} = ${coerceValue(expr.type, this.memoryView(expr, ptr))};`
             );
         } else {
             // Slow path using function calls into Wasm
@@ -1156,7 +1158,7 @@ class Compiler {
     }
 
     _compileStore(expr) {
-        if (expr.align == expr.bytes) {
+        if (fastMemory && expr.align == expr.bytes) {
             return this.opcode(expr, [expr.ptr, expr.value], (_result, ptr, value) =>
                 `${this.memoryView(expr, ptr)} = ${value};`
             );
