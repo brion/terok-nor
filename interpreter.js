@@ -1164,16 +1164,16 @@ class Compiler {
         }
         switch (expr.bytes) {
             case 1:
-                addr = `${ptr}`;
+                addr = `${ptr} >>> 0`;
                 break;
             case 2:
-                addr = `(${ptr} >> 1)`;
+                addr = `${ptr} >>> 1`;
                 break;
             case 4:
-                addr = `(${ptr} >> 2)`;
+                addr = `${ptr} >>> 2`;
                 break;
             case 8:
-                addr = `(${ptr} >> 3)`;
+                addr = `${ptr} >>> 3`;
                 break;
             default:
                 throw new Error('bad type');
@@ -1195,7 +1195,7 @@ class Compiler {
             const func = this.instance._ops.memory.load[expr.type][expr.bytes << 3][signed];
             const offset = expr.offset ? ` + ${expr.offset}` : ``;
             return this.opcode(expr, [expr.ptr], (result, ptr) =>
-                `${result} = /* ${func.opname} */ ${this.enclose(func)}(${ptr}${offset});`
+                `${result} = /* unaligned load */ ${this.enclose(func)}(${ptr}${offset});`
             );
         }
     }
@@ -1211,7 +1211,7 @@ class Compiler {
             const func = this.instance._ops.memory.store[valueInfo.type][expr.bytes << 3];
             const offset = expr.offset ? ` + ${expr.offset}` : ``;
             return this.opcode(expr, [expr.ptr, expr.value], (_result, ptr, value) =>
-                `/* ${func.opname} */ ${this.enclose(func)}(${ptr}${offset}, ${value});`
+                `/* unaligned store */ ${this.enclose(func)}(${ptr}${offset}, ${value});`
             );
         }
     }
@@ -1236,7 +1236,7 @@ class Compiler {
             return `-${operand}`;
         default:
             const func = this.instance._ops.unary[op];
-            return `/* ${func.opname} */ ${this.enclose(func)}(${operand})`;
+            return `/* unary${op} */ ${this.enclose(func)}(${operand})`;
         }
     }
 
@@ -1304,7 +1304,7 @@ class Compiler {
                 return `(${left} >= ${right}) | 0`;
             default:
                 const func = this.instance._ops.binary[op];
-                return `/* ${func.opname} */ ${this.enclose(func)}(${left}, ${right})`;
+                return `/* binary${op} */ ${this.enclose(func)}(${left}, ${right})`;
         }
     }
 
