@@ -125,10 +125,10 @@ class Instance {
 
         // For debugging support
         this._debug = module._debug;
-        this._singleStep = 0;
+        this._singleStep = false;
         this._activeBreakpoints = new Int32Array();
         this._sequenceIndexes = new Int32Array();
-        this._activeBreakpointCount = 0;
+        this._breakpoints = new Set();
         this._breakpointIndexes = new Map();
         this._sequences = [];
         this._activeSequences = new Int32Array();
@@ -327,42 +327,68 @@ class Instance {
     }
 
     setBreakpoint(sourceLocation) {
-        const index = this._breakpointIndex(sourceLocation);
-        if (!this._activeBreakpoints[index]) {
-            this._activeBreakpoints[index] = 1;
-            this._activeBreakpointCount++;
-
-            const sequence = this._sequenceIndexes[index];
-            if (sequence > -1) {
-                this._activeSequences[sequence]++;
+        if (!this.hasBreakpoint(sourceLocation)) {
+            const index = this._breakpointIndex(sourceLocation);
+            if (!this._singleStep) {
+                this._activeBreakpoints[index] = 1;
+    
+                const sequence = this._sequenceIndexes[index];
+                if (sequence != -1) {
+                    this._activeSequences[sequence]++;
+                }
             }
         }
     }
 
     clearBreakpoint(sourceLocation) {
-        const index = this._breakpointIndex(sourceLocation);
-        if (this._activeBreakpoints[index]) {
-            this._activeBreakpoints[index] = 0;
-            this._activeBreakpointCount--;
+        if (this.hasBreakpoint(sourceLocation)) {
+            const index = this._breakpointIndex(sourceLocation);
+            if (!this._singleStep) {
+                this._activeBreakpoints[index] = 0;
 
-            const sequence = this._sequenceIndexes[index];
-            if (sequence > -1) {
-                this._activeSequences[sequence]--;
+                const sequence = this._sequenceIndexes[index];
+                if (sequence != -1) {
+                    this._activeSequences[sequence]--;
+                }
             }
+            this._breakpoints.delete(sourceLocation);
         }
     }
 
     hasBreakpoint(sourceLocation) {
-        const index = this._breakpointIndex(sourceLocation);
-        return this._activeBreakpoints[index];
+        return this._breakpoints.has(sourceLocation);
+    }
+
+    breakpoints() {
+        return Array.from(this._breakpoints.keys());
     }
 
     get singleStep() {
-        return Boolean(this._singleStep);
+        return this._singleStep;
     }
 
     set singleStep(val) {
-        this._singleStep = val ? 1 : 0;
+        val = Boolean(val);
+        if (val == this._singleStep) {
+            return;
+        }
+        if (val) {
+            // Set the breakpoint bitmaps ALL ON
+            this._activeBreakpoints.fill(1);
+            this._activeSequences.fill(1);
+        } else {
+            // Set the breakpoint bitmaps to their correct values
+            this._activeBreakpoints.fill(0);
+            this._activeSequences.fill(0);
+            for (let index of this._breakpoints) {
+                this._activeBreakpoints[index] = 1;
+                const sequence = this._sequenceIndexes[index];
+                if (sequence > -1) {
+                    this._activeSequences[sequence]++;
+                }
+            }
+        }
+        this._singleStep = val;
     }
 
     _breakpointIndex(sourceLocation) {
@@ -831,12 +857,9 @@ class Compiler {
             ${node.infallible ? `` : node.spill}
             ${node.fragment}
         `;
-        // Note the use of | rather than || -- actually runs faster in node
-        // Values from breakpoint are guaranteed to be 0 or 1
-        // as is instance._singleStep
         const dirtyPath = (node) => `
             ${node.infallible ? `` : node.spill}
-            if (instance._singleStep | activeBreakpoints[${this.instance._breakpointIndex(node.sourceLocation)}]) {
+            if (activeBreakpoints[${this.instance._breakpointIndex(node.sourceLocation)}]) {
                 ${node.infallible ? node.spill : ``}
                 await instance.debugger();
                 ${node.memory ? `
@@ -852,7 +875,7 @@ class Compiler {
                 nodes.map((node) => node.sourceLocation)
             );
             return `
-                if (instance._singleStep | activeSequences[${sequence}]) {
+                if (activeSequences[${sequence}]) {
                     ${nodes.map(dirtyPath).join('\n')}
                 } else {
                     ${nodes.filter((node) => node.memory).length ? `
@@ -1231,6 +1254,9 @@ class Compiler {
     
     unaryOp(op, operand) {
         switch (op) {
+        case b.EqZInt32:
+        case b.EqZInt64:
+            return `!${operand} | 0`;
         case b.NegFloat32:
         case b.NegFloat64:
             return `-${operand}`;
@@ -1297,7 +1323,11 @@ class Compiler {
             case b.ShrUInt32:
                 return `(${left} >>> ${right}) | 0`;
             case b.EqInt32:
+            case b.EqInt64:
                 return `(${left} === ${right}) | 0`;
+            case b.NeInt32:
+            case b.NeInt64:
+                return `(${left} !== ${right}) | 0`;
             case b.LtSInt32:
                 return `(${left} < ${right}) | 0`;
             case b.LtUInt32:
