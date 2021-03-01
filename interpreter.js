@@ -110,11 +110,28 @@ class Module {
 }
 
 class Instance {
+
     constructor(module, imports) {
         this.exports = {};
-        this.callback = null;
 
+        // For debugging support
         this._debug = module._debug;
+        this._interrupt = false;
+        this._singleStep = new Set();
+        this._breakpoints = new Map();
+
+        Object.defineProperties(this, {
+            callback: {
+                get: function() {
+                    return this._callback;
+                },
+                set: function(val) {
+                    this._callback = val;
+                    this._updateInterrupt();
+                }
+            }
+        });
+
         this._mod = module._mod;
         this._globals = {};
         this._funcs = {};
@@ -293,9 +310,63 @@ class Instance {
     /// Generate a full stack trace, dumping stacks and locals from
     /// the internal state of each function on the call stack.
     /// These are Frame objects.
-    stackTrace() {
-        return this._stackTracers.map((dump) => dump());
+    stackTrace(start=undefined, end=undefined) {
+        const stack = this._stackTracers.slice(start, end);
+        return stack.map((dump) => dump());
     }
+
+    setBreakpoint(node, callback) {
+        // @todo use nodes that can be transferred safely, which means
+        // normalizing them from string structs or whatever
+        if (this._breakpoints.has(node)) {
+            this._breakpoints.get(node).push(callback);
+        } else {
+            this._breakpoints.set(node, [callback]);
+        }
+        this._updateInterrupt();
+    }
+
+    clearBreakpoint(node, callback) {
+        if (this._breakpoints.has(node)) {
+            const callbacks = this._breakpoints.get(node);
+            const index = callbacks.indexOf(callback);
+            if (index != -1) {
+                callbacks.splice(index, 1);
+            }
+            if (callbacks.length === 0) {
+                this._breakpoints.delete(node);
+            }
+        }
+        this._updateInterrupt();
+    }
+
+    singleStep(callback) {
+        this._singleStep.add(callback);
+        this._updateInterrupt();
+    }
+
+    clearSingleStep(callback) {
+        this._singleStep.delete(callback);
+        this._updateInterrupt();
+    }
+
+    _updateInterrupt() {
+        this._interrupt =
+            Boolean(this._singleStep.size) ||
+            Boolean(this._breakpoints.size);
+    }
+
+    async _handleInterrupt(sourceLocation) {
+        for (let callback of this._singleStep) {
+            await callback();
+        }
+        if (this._breakpoints.has(sourceLocation)) {
+            for (let callback of this._breakpoints.get(sourceLocation)) {
+                await callback();
+            }
+        }
+    }
+
 }
 
 /// Parse a module from binary form and prepare it to be instantiated later.
@@ -449,7 +520,7 @@ class Frame {
     constructor(instance) {
         this.instance = instance;
         this.name = '';
-        this.node = null;
+        this.sourceLocation = null;
         this.stack = null;
         this.locals = null;
     }
@@ -461,8 +532,22 @@ function* range(end) {
     }
 }
 
+function getExpressionInfo(expr) {
+    if (typeof expr === 'object') {
+        return expr;
+    } else {
+        // Keep the reference ID on the info object as we pass it around.
+        // This is a placeholder until we can retain source locations that
+        // make sense (eg against the binary, or against a generated text
+        // disassembly).
+        const info = b.getExpressionInfo(expr);
+        info.sourceLocation = String(expr);
+        return info;
+    }
+}
+
 function infallible(expr) {
-    const info = (typeof expr === 'object') ? expr : b.getExpressionInfo(expr);
+    const info = getExpressionInfo(expr);
     switch (info.id) {
         case b.BlockId:
             return info.children.filter(infallible).length == info.children.length;
@@ -524,13 +609,13 @@ function infallible(expr) {
 }
 
 function uninterruptible(expr) {
-    const info = (typeof expr === 'object') ? expr : b.getExpressionInfo(expr);
+    const info = getExpressionInfo(expr);
     switch (info.id) {
         case b.BlockId:
             // Note block children are *not* like inputs!
             // We need to transit them because they happen inside our node's output.
+            //return info.children.filter(uninterruptible).length == info.children.length;
             return false;
-            return info.children.filter(uninterruptible).length == info.children.length;
         case b.IfId:
             return uninterruptible(info.ifTrue) &&
                 (!info.ifFalse || uninterruptible(info.true))
@@ -590,7 +675,7 @@ class Compiler {
         const func = `
             return async (${paramNames.join(', ')}) => {
                 const instance = ${inst};
-                const table = instance.table;
+                const table = instance._table;
                 ${
                     compiler.maxDepth
                     ? `let ${compiler.stackVars(compiler.maxDepth).join(`, `)};`
@@ -603,6 +688,8 @@ class Compiler {
                 }
                 let spill;
                 ${instance._debug ? `
+                    const breakpoints = instance._breakpoints;
+                    const singleStep = instance._singleStep;
                     const stackSpill = [${
                         Array.from(range(compiler.maxDepth + 1), (_, depth) => {
                             return `
@@ -614,16 +701,13 @@ class Compiler {
                 const dump = () => {
                     const frame = new ${compiler.enclose(Frame)}(instance);
                     frame.name = ${compiler.literal(name)};
-                    ${instance._debug ? `` : `
+                    ${instance._debug ? `
                         frame.stack = stackSpill[spill.depth]();
                         frame.locals = [${compiler.localVars().join(`, `)}];
-                    `}
-                    frame.node = spill.node;
+                    ` : ``}
+                    frame.sourceLocation = spill.sourceLocation;
                     return frame;
                 };
-                ${instance._debug ? `
-                    const interrupt = async () => instance.callback(dump());
-                `: ``}
                 try {
                     instance._stackTracers.push(dump);
                     ${body}
@@ -660,7 +744,7 @@ class Compiler {
     /// Compile a single expression from the AST into an array
     // of JS async function source fragments and metadata
     compile(expression) {
-        const expr = (typeof expression === 'object') ? expression : b.getExpressionInfo(expression);
+        const expr = getExpressionInfo(expression);
         const handler = expressionMap(expr.id);
         if (this[handler]) {
             return this[handler](expr);
@@ -677,20 +761,22 @@ class Compiler {
         `;
         const dirtyPath = (node) => `
             ${node.infallible ? `` : node.spill}
-            if (instance.callback) {
-                ${node.infallible ? node.spill : ``}
-                await interrupt();
+            if (instance._interrupt) {
+                if (singleStep.size || breakpoints.get(${this.literal(node.sourceLocation)})) {
+                    ${node.infallible ? node.spill : ``}
+                    await instance._handleInterrupt();
+                }
             }
             ${node.fragment}
         `;
+        const bifurcate = (nodes) => `
+            if (instance._interrupt) {
+                ${nodes.map(dirtyPath).join('\n')}
+            } else {
+                ${nodes.map(cleanPath).join('\n')}
+            }
+        `;
         if (this.instance._debug) {
-            const bifurcate = (nodes) => `
-                if (instance.callback) {
-                    ${nodes.map(dirtyPath).join('\n')}
-                } else {
-                    ${nodes.map(cleanPath).join('\n')}
-                }
-            `;
             let source = ``;
             const streak = [];
             const spillStreak = () => {
@@ -750,7 +836,7 @@ class Compiler {
     spill(expr) {
         return `
             spill = ${this.enclose({
-                node: expr,
+                sourceLocation: expr.sourceLocation,
                 depth: this.stack.length
             })};
         `;
@@ -972,7 +1058,7 @@ class Compiler {
     }
 
     _compileStore(expr) {
-        const valueInfo = b.getExpressionInfo(expr.value);
+        const valueInfo = getExpressionInfo(expr.value);
         const func = this.enclose(this.instance._ops.memory.store[valueInfo.type][expr.bytes << 3]);
         const offset = expr.offset ? ` + ${expr.offset}` : ``;
         return this.opcode(expr, [expr.ptr, expr.value], (result, ptr, value) =>
