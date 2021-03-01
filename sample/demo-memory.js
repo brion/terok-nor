@@ -30,12 +30,7 @@ const imports = {
             await time('process_i8', exports.process_i8);
             await time('process_i16', exports.process_i16);
             await time('process_i32', exports.process_i32);
-            if (instance instanceof WebAssembly.Instance) {
-                // skip i64
-                // bignum integration is not deployed yet on v8
-            } else {
-                await time('process_i64', exports.process_i64);
-            }
+            await time('process_i64', exports.process_i64);
             await time('process_f32', exports.process_f32);
             await time('process_f64', instance.exports.process_f64);
 
