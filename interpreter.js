@@ -138,6 +138,7 @@ class Instance {
 
         // @todo support multiples
         this._memory = null;
+        this._views = null;
         this._table = null;
 
         this._ops = null;
@@ -170,20 +171,26 @@ class Instance {
                     }
                     this._memory = new Memory(memInit);
                 }
+                const buffer = this._memory.buffer;
+                this._views = {
+                    buffer,
+                    i8: new Int8Array(buffer),
+                    i16: new Int16Array(buffer),
+                    i32: new Int32Array(buffer),
+                    i64: new BigInt64Array(buffer),
+                    u8: new Uint8Array(buffer),
+                    u16: new Uint16Array(buffer),
+                    u32: new Uint32Array(buffer),
+                    u64: new BigUint64Array(buffer),
+                    f32: new Float32Array(buffer),
+                    f64: new Float64Array(buffer)
+                };
                 const numSegments = mod.getNumMemorySegments();
                 for (let i = 0; i < numSegments; i++) {
                     const segment = mod.getMemorySegmentInfoByIndex(i);
                     if (!segment.passive) {
                         const offset = await evaluateConstant(segment.offset);
-
-                        let heap = new Uint8Array(this.memory.buffer);
-                        const headroom = heap.length - (offset + segment.data.length);
-                        if (headroom < 0) {
-                            this._memory.grow(Math.ceil(headroom / 65536));
-                            heap = new Uint8Array(this._memory.buffer);
-                        }
-
-                        heap.set(offset, segment.data);
+                        this._views.u8.set(offset, segment.data);
                     }
                 }
             } else {
@@ -379,6 +386,24 @@ class Instance {
         }
         return sequence;
     }
+
+    _updateViews() {
+        const views = this._views;
+        const buffer = this._memory.buffer;
+        if (views.buffer !== buffer) {
+            _views.buffer = buffer;
+            _views.i8 = new Int8Array(buffer);
+            _views.i16 = new Int16Array(buffer);
+            _views.i32 = new Int32Array(buffer);
+            _views.i64 = new BigInt64Array(buffer);
+            _views.u8 = new Uint8Array(buffer);
+            _views.u16 = new Uint16Array(buffer);
+            _views.u32 = new Uint32Array(buffer);
+            _views.u64 = new BigUint64Array(buffer);
+            _views.f32 = new Float32Array(buffer);
+            _views.f64 = new Float64Array(buffer);
+        }
+    }
 }
 
 /// Parse a module from binary form and prepare it to be instantiated later.
@@ -465,6 +490,23 @@ function coerceValue(type, value) {
         default:
             // Assume others are reference types?
             return `${value}`;
+    }
+}
+
+function sizeof(type) {
+    switch (type) {
+        case b.none:
+            return 0;
+        case b.i32:
+            return 4;
+        case b.i64:
+            return 8;
+        case b.f32:
+            return 4;
+        case b.f64:
+            return 8;
+        default:
+            throw new Error('bad type');
     }
 }
 
@@ -682,6 +724,7 @@ class Compiler {
         const func = `
             return async (${paramNames.join(', ')}) => {
                 const instance = ${inst};
+                const views = instance._views;
                 const table = instance._table;
                 ${
                     compiler.maxDepth
@@ -1060,22 +1103,72 @@ class Compiler {
         `);
     }
 
-    _compileLoad(expr) {
-        const signed = expr.isSigned ? 'signed' : 'unsigned';
-        const func = this.instance._ops.memory.load[expr.type][expr.bytes << 3][signed];
+    memoryView(expr, ptr) {
+        const bits = expr.bytes * 8;
+        const type = expr.type || getExpressionInfo(expr.value).type;
+        let view, addr;
+        switch (type) {
+            case b.i32:
+            case b.i64:
+                view = (expr.isSigned || expr.bytes == sizeof(type)) ? 'i' + bits : 'u' + bits;
+                break;
+            case b.f32:
+            case b.f64:
+                view = 'f' + bits;
+                break;
+            default:
+                throw new Error('bad type');
+        }
+        switch (expr.bytes) {
+            case 1:
+                addr = `${ptr}`;
+                break;
+            case 2:
+                addr = `(${ptr} >> 1)`;
+                break;
+            case 4:
+                addr = `(${ptr} >> 2)`;
+                break;
+            case 8:
+                addr = `(${ptr} >> 3)`;
+                break;
+            default:
+                throw new Error('bad type');
+        }
         const offset = expr.offset ? ` + ${expr.offset}` : ``;
-        return this.opcode(expr, [expr.ptr], (result, ptr) =>
-            `${result} = /* ${func.opname} */ ${this.enclose(func)}(${ptr}${offset});`
-        );
+        return `views.${view}[${addr}${offset}]`;
+    }
+
+    _compileLoad(expr) {
+        if (expr.align == expr.bytes) {
+            return this.opcode(expr, [expr.ptr], (result, ptr) =>
+                `${result} = ${this.memoryView(expr, ptr)};`
+            );
+        } else {
+            // Slow path using function calls into Wasm
+            const signed = expr.isSigned ? 'signed' : 'unsigned';
+            const func = this.instance._ops.memory.load[expr.type][expr.bytes << 3][signed];
+            const offset = expr.offset ? ` + ${expr.offset}` : ``;
+            return this.opcode(expr, [expr.ptr], (result, ptr) =>
+                `${result} = /* ${func.opname} */ ${this.enclose(func)}(${ptr}${offset});`
+            );
+        }
     }
 
     _compileStore(expr) {
-        const valueInfo = getExpressionInfo(expr.value);
-        const func = this.instance._ops.memory.store[valueInfo.type][expr.bytes << 3];
-        const offset = expr.offset ? ` + ${expr.offset}` : ``;
-        return this.opcode(expr, [expr.ptr, expr.value], (result, ptr, value) =>
-            `/* ${func.opname} */ ${this.enclose(func)}(${ptr}${offset}, ${value});`
-        );
+        if (expr.align == expr.bytes) {
+            return this.opcode(expr, [expr.ptr, expr.value], (_result, ptr, value) =>
+                `${this.memoryView(expr, ptr)} = ${value};`
+            );
+        } else {
+            // Slow path using function calls into Wasm
+            const valueInfo = getExpressionInfo(expr.value);
+            const func = this.instance._ops.memory.store[valueInfo.type][expr.bytes << 3];
+            const offset = expr.offset ? ` + ${expr.offset}` : ``;
+            return this.opcode(expr, [expr.ptr, expr.value], (_result, ptr, value) =>
+                `/* ${func.opname} */ ${this.enclose(func)}(${ptr}${offset}, ${value});`
+            );
+        }
     }
 
     _compileConst(expr) {
@@ -1194,9 +1287,11 @@ class Compiler {
     }
 
     _compileMemoryGrow(expr) {
+        // @fixme check for growth requirements on demand in debug path or async
         const memory = this.enclose(this.instance._memory);
         return this.opcode(expr, [expr.delta], (result, delta) => `
             ${result} = /* memory */ ${memory}.grow(${delta});
+            instance._updateViews();
         `);
     }
 
