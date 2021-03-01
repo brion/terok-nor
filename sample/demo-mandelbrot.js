@@ -92,6 +92,11 @@ const imports = {
 
     console.log('done.');
 
-    //console.log(debug.instance.exports.iterate_mandelbrot.toString());
+    const source = 'sample/compiled-mandelbrot.js';
+    fs.writeFileSync(
+        source,
+        debug.instance.exports.iterate_mandelbrot.toString()
+    );
+    console.log(`wrote source to ${source}`);
 
 })();

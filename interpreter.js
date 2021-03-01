@@ -123,7 +123,6 @@ class Instance {
 
         // For debugging support
         this._debug = module._debug;
-        this._interrupt = false;
         this._singleStep = 0;
         this._breakpoints = new Int32Array();
         this._breakpointSequences = new Int32Array();
@@ -132,18 +131,6 @@ class Instance {
         this._sequences = [];
         this._sequencesActive = new Int32Array();
         this.debugger = null;
-
-        Object.defineProperties(this, {
-            callback: {
-                get: function() {
-                    return this._callback;
-                },
-                set: function(val) {
-                    this._callback = val;
-                    this._updateInterrupt();
-                }
-            }
-        });
 
         this._mod = module._mod;
         this._globals = {};
@@ -333,7 +320,6 @@ class Instance {
         if (!this._breakpoints[index]) {
             this._breakpoints[index] = 1;
             this._breakpointsActive++;
-            this._updateInterrupt();
 
             const sequence = this._breakpointSequences[index];
             if (sequence > -1) {
@@ -347,7 +333,6 @@ class Instance {
         if (this._breakpoints[index]) {
             this._breakpoints[index] = 0;
             this._breakpointsActive--;
-            this._updateInterrupt();
 
             const sequence = this._breakpointSequences[index];
             if (sequence > -1) {
@@ -367,11 +352,6 @@ class Instance {
 
     set singleStep(val) {
         this._singleStep = val ? 1 : 0;
-        this._updateInterrupt();
-    }
-
-    _updateInterrupt() {
-        this._interrupt = Boolean(this._singleStep || this._breakpointsActive);
     }
 
     _breakpointIndex(sourceLocation) {
@@ -878,10 +858,7 @@ class Compiler {
 
     spill(expr) {
         return `
-            spill = ${this.enclose({
-                sourceLocation: expr.sourceLocation,
-                depth: this.stack.length
-            })};
+                spill = {sourceLocation: ${this.literal(expr.sourceLocation)}, depth: ${this.literal(this.stack.length)}};
         `;
     }
 
