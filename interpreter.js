@@ -118,7 +118,7 @@ class Instance {
         this._debug = module._debug;
         this._interrupt = false;
         this._singleStep = false;
-        this._breakpoints = Object.create(null);
+        this._breakpoints = new Set();
         this._breakpointCount = 0;
         this.debugger = null;
 
@@ -318,23 +318,23 @@ class Instance {
     }
 
     setBreakpoint(sourceLocation) {
-        if (!this._breakpoints[sourceLocation]) {
-            this._breakpoints[sourceLocation] = true;
+        if (!this._breakpoints.has(sourceLocation)) {
+            this._breakpoints.add(sourceLocation);
             this._breakpointCount++;
             this._updateInterrupt();
         }
     }
 
     clearBreakpoint(sourceLocation) {
-        if (this._breakpoints[sourceLocation]) {
-            delete this._breakpoints[sourceLocation];
+        if (this._breakpoints.has(sourceLocation)) {
+            this._breakpoints.delete(sourceLocation);
             this._breakpointCount--;
             this._updateInterrupt();
         }
     }
 
     hasBreakpoint(sourceLocation) {
-        return this._breakpoints.hasOwnProperty(sourceLocation);
+        return this._breakpoints.has(sourceLocation);
     }
 
     get singleStep() {
@@ -744,7 +744,7 @@ class Compiler {
         const dirtyPath = (node) => `
             ${node.infallible ? `` : node.spill}
             if (instance._interrupt) {
-                if (instance._singleStep || breakpoints[${this.literal(node.sourceLocation)}]) {
+                if (instance._singleStep || breakpoints.has(${this.literal(node.sourceLocation)})) {
                     ${node.infallible ? node.spill : ``}
                     await instance.debugger();
                 }
