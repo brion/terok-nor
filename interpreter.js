@@ -522,15 +522,9 @@ function expressionMap(id) {
     return expressions[id];
 }
 
-/// Exceptions thrown from inside the interpreter save their stack frames
-/// in an array on this symbol property.
-const interpreterStackTrace = Symbol('interpreterStackTrace');
-
 /// Dumped execution state frame for a single function.
 ///
 /// Returned with stack traces from `Interpreter.prototype.stackTrace`
-/// or through the `[interpreterStackTrace]` symbol property on exceptions
-/// thrown via interpreter calls.
 class Frame {
     constructor(instance) {
         this.instance = instance;
@@ -688,7 +682,6 @@ class Compiler {
         const paramNames = params.map((_type, index) => `param${index}`);
         const body = compiler.flatten(compiler.compile(expr));
         const hasResult = (results !== b.none);
-        const stackKey = compiler.enclose(interpreterStackTrace);
         const func = `
             return async (${paramNames.join(', ')}) => {
                 const instance = ${inst};
@@ -729,15 +722,6 @@ class Compiler {
                     instance._stackTracers.push(dump);
                     ${body}
                     ${hasResult ? `return ${compiler.pop()};` : ``}
-                } catch (e) {
-                    if (spill) {
-                        if (e[${stackKey}]) {
-                            e[${stackKey}].push(dump);
-                        } else {
-                            e[${stackKey}] = [dump];
-                        }
-                    }
-                    throw e;
                 } finally {
                     instance._stackTracers.pop();
                 }
@@ -1498,6 +1482,7 @@ function buildMemoryOpsMap(ops, op, type, size, subSizes=[]) {
 /// The Module and Instance classes are custom, and can only be used via
 /// async APIs.
 const Interpreter = {
+    // WebAssembly API clone
     Global,
     Memory,
     Table,
@@ -1507,13 +1492,14 @@ const Interpreter = {
     compileStreaming,
     instantiate,
     instantiateStreaming,
-    interpreterStackTrace,
-    isReady: false,
-};
 
-Interpreter.ready = b.ready.then(() => {
-    Interpreter.isReady = true;
-    return Interpreter;
-});
+    // Custom API
+    Frame,
+    isReady: false,
+    ready: b.ready.then(() => {
+        Interpreter.isReady = true;
+        return Interpreter;
+    })
+};
 
 module.exports = Interpreter;
