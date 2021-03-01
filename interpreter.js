@@ -141,8 +141,6 @@ class Instance {
         this._memory = null;
         this._table = null;
 
-        this._ops = null;
-
         this._stackTracers = [];
 
         this.isReady = false;
@@ -184,11 +182,6 @@ class Instance {
             } else {
                 throw new Error('Currently requires a memory');
             }
-
-            // Create the ops module
-            // This implements some binary ops via sync WebAssembly
-            // @todo remove this
-            this._ops = buildOpsModule();
 
             const evaluateConstant = async (expr) => {
                 const func = Compiler.compileExpression(this, expr);
@@ -1401,9 +1394,10 @@ class Compiler {
             case b.AddInt64:
                 return `BigInt.asIntN(64, ${left} + ${right})`;
             case b.AddFloat32:
-                return `${this.enclose(Math.fround)}(${left} + ${right})`;
+                return `Math.fround(${left} + ${right})`;
             case b.AddFloat64:
                 return `${left} + ${right}`;
+
             case b.SubInt32:
                 return `${left} - ${right} | 0`;
             case b.SubInt64:
@@ -1412,78 +1406,162 @@ class Compiler {
                 return `${this.enclose(Math.fround)}(${left} - ${right})`;
             case b.SubFloat64:
                 return `${left} - ${right}`;
+
             case b.MulInt32:
                 return `Math.imul(${left}, ${right})`;
             case b.MulInt64:
                 return `BigInt.asIntN(64, ${left} * ${right})`;
             case b.MulFloat32:
-                return `${this.enclose(Math.fround)}(${left} * ${right})`;
+                return `Math.fround(${left} * ${right})`;
             case b.MulFloat64:
                 return `${left} * ${right}`;
-            case b.DivInt32:
+
+            case b.DivSInt32:
                 return `(${left} / ${right}) | 0`;
-            case b.DivInt64:
+            case b.DivSInt64:
                 return `${left} / ${right}`;
+            case b.DivUInt32:
+                return `((${left} >>> 0) / (${right} >>> 0)) | 0`;
+            case b.DivUInt64:
+                return `BigInt.asIntN(BigInt.asUintN(64, ${left}) / BigInt.asUintN(64, ${right}))`;
             case b.DivFloat32:
-                return `${this.enclose(Math.fround)}(${left} / ${right})`;
+                return `Math.fround(${left} / ${right})`;
             case b.DivFloat64:
                 return `${left} / ${right}`;
+
+            case b.RemSInt32:
+                return `(${left} % ${right}) | 0`;
+            case b.RemSInt64:
+                return `${left} % ${right}`;
+            case b.RemUInt32:
+                return `((${left} >>> 0) % (${right} >>> 0)) | 0`;
+            case b.RemUInt64:
+                return `BigInt.asIntN(BigInt.asUintN(64, ${left}) % BigInt.asUintN(64, ${right}))`;
+
             case b.AndInt32:
             case b.AndInt64:
                 return `${left} & ${right}`;
+
             case b.OrInt32:
             case b.OrInt64:
                 return `${left} | ${right}`;
+
             case b.XorInt32:
             case b.XorInt64:
                 return `${left} ^ ${right}`;
+
             case b.ShlInt32:
                 return `${left} << ${right}`;
             case b.ShlInt64:
                 return `BigInt.asIntN(64, ${left} << (${right} & 63n))`;
+
             case b.ShrSInt32:
                 return `${left} >> ${right}`;
+            case b.ShrSInt64:
+                return `${left} >> (${right} & 63n)`;
             case b.ShrUInt32:
                 return `(${left} >>> ${right}) | 0`;
             case b.ShrUInt64:
                 return `BigInt.asIntN(64, BigInt.asUintN(64, ${left}) >> (${right} & 63n)))`;
+
+            case b.RotLInt32:
+                // https://en.wikipedia.org/wiki/Circular_shift#Implementing_circular_shifts
+                return `${left} << (${right} & 31) | ${left} >> (32 - (${right} & 31))`;
+            case b.RotLInt64:
+                return `BigInt.asIntN(64, ${left} << (${right} & 63n) | ${left} >> (64n - (${right} & 63n)))`;
+            case b.RotRInt32:
+                return `${left} >> (${right} & 31) | ${left} << (32 - (${right} & 31))`;
+            case b.RotRInt64:
+                return `BigInt.asIntN(64, ${left} >> (${right} & 63n) | ${left} << (64n - (${right} & 63n)))`;
+
             case b.EqInt32:
             case b.EqInt64:
                 return `(${left} === ${right}) | 0`;
+            case b.EqFloat32:
+            case b.EqFloat64:
+                // @todo double-check this is the right comparison for floats
+                // This will return true for comparing two NaNs
+                // and false for comparing -0 and +0
+                // whereas using === would do the opposite for these cases.
+                return `Object.is(${left}, ${right}) | 0`;
+
             case b.NeInt32:
             case b.NeInt64:
                 return `(${left} !== ${right}) | 0`;
+            case b.NeFloat32:
+            case b.NeFloat64:
+                // @todo double-check this is the right comparison for floats
+                // This will return false for comparing two NaNs
+                // and true for comparing -0 and +0
+                // whereas using !== would do the opposite for these cases.
+                return `!Object.is(${left}, ${right}) | 0`;
+
             case b.LtSInt32:
-                return `(${left} < ${right}) | 0`;
-            case b.LtUInt32:
-                return `((${left} >>> 0) < (${right} >>> 0)) | 0`;
+            case b.LtSInt64:
             case b.LtFloat32:
             case b.LtFloat64:
                 return `(${left} < ${right}) | 0`;
+            case b.LtUInt32:
+                return `((${left} >>> 0) < (${right} >>> 0)) | 0`;
+            case b.LtUInt64:
+                return `(BigInt.asUintN(64, ${left}) < BigInt.asUintN(64, ${right})) | 0`;
+
             case b.LeSInt32:
-                return `(${left} <= ${right}) | 0`;
-            case b.LeUInt32:
-                return `((${left} >>> 0) <= (${right} >>> 0)) | 0`;
+            case b.LeSInt64:
             case b.LeFloat32:
             case b.LeFloat64:
                 return `(${left} <= ${right}) | 0`;
+            case b.LeUInt32:
+                return `((${left} >>> 0) <= (${right} >>> 0)) | 0`;
+            case b.LeUInt64:
+                return `(BigInt.asUintN(64, ${left}) <= BigInt.asUintN(64, ${right})) | 0`;
+        
             case b.GtSInt32:
-                return `(${left} > ${right}) | 0`;
-            case b.GtUInt32:
-                return `((${left} >>> 0) > (${right} >>> 0)) | 0`;
             case b.GtFloat32:
             case b.GtFloat64:
                 return `(${left} > ${right}) | 0`;
+            case b.GtUInt32:
+                return `((${left} >>> 0) > (${right} >>> 0)) | 0`;
+            case b.GtUInt64:
+                return `(BigInt.asUintN(64, ${left}) > BigInt.asUintN(64, ${right})) | 0`;
+        
             case b.GeSInt32:
-                return `(${left} >= ${right}) | 0`;
-            case b.GeUInt32:
-                return `((${left} >>> 0) >= (${right} >>> 0)) | 0`;
             case b.GeFloat32:
             case b.GeFloat64:
                 return `(${left} >= ${right}) | 0`;
+            case b.GeUInt32:
+                return `((${left} >>> 0) >= (${right} >>> 0)) | 0`;
+            case b.GeUInt64:
+                return `(BigInt.asUintN(64, ${left}) >= BigInt.asUintN(64, ${right})) | 0`;
+
+            case b.CopySignFloat32:
+                {
+                    const view = this.enclose(reinterpretView);
+                    return `/* copysign */
+                        ${view}.setFloat32(0, ${operand}, true),
+                        ${view}.setInt32(0, ${view}.getInt32(0, true) | 0x80000000, true),
+                        ${view}.getFloat32(0, true)
+                    `;
+                }
+            case b.CopySignFloat64:
+                {
+                    const view = this.enclose(reinterpretView);
+                    return `/* copysign */
+                        ${view}.setFloat64(0, ${operand}, true),
+                        ${view}.setInt32(4, ${view}.getInt32(4, true) | 0x80000000, true),
+                        ${view}.getFloat64(0, true)
+                    `;
+                }
+    
+            case b.MinFloat32:
+            case b.MinFloat64:
+                return `Math.min(${left}, ${right})`;
+            case b.MaxFloat32:
+            case b.MaxFloat64:
+                return `Math.max(${left}, ${right})`;
+
             default:
-                const func = this.instance._ops.binary[op];
-                return `/* binary${op} */ ${this.enclose(func)}(${left}, ${right})`;
+                throw new Error('Unknown binary op');
         }
     }
 
@@ -1539,142 +1617,6 @@ class Compiler {
             throw new WebAssembly.RuntimeError("Unreachable");
         `);
     }
-}
-
-function buildOpsModule() {
-    const m = b.parseText("(module)");
-
-    const promote = (expr, type) => {
-        if (type == b.f32) {
-            return m.f64.promote(expr);
-        }
-        return expr;
-    };
-    const demote = (expr, type) => {
-        if (type == b.f32) {
-            return m.f32.demote(expr);
-        }
-        return expr;
-    };
-    const adapt = (type) => {
-        if (type == b.f32) {
-            return b.f64;
-        }
-        return type;
-    };
-
-    const binaryOps = [
-        [b.AddInt32, m.i32.add, b.i32, b.i32],
-        [b.AddInt64, m.i64.add, b.i64, b.i64],
-        [b.AddFloat32, m.f32.add, b.f32, b.f32],
-        [b.AddFloat64, m.f64.add, b.f64, b.f64],
-        [b.SubInt32, m.i32.sub, b.i32, b.i32],
-        [b.SubInt64, m.i64.sub, b.i64, b.i64],
-        [b.SubFloat32, m.f32.sub, b.f32, b.f32],
-        [b.SubFloat64, m.f64.sub, b.f64, b.f64],
-        [b.MulInt32, m.i32.mul, b.i32, b.i32],
-        [b.MulInt64, m.i64.mul, b.i64, b.i64],
-        [b.MulFloat32, m.f32.mul, b.f32, b.f32],
-        [b.MulFloat64, m.f64.mul, b.f64, b.f64],
-        [b.DivSInt32, m.i32.div_s, b.i32, b.i32],
-        [b.DivSInt64, m.i64.div_s, b.i64, b.i64],
-        [b.DivUInt32, m.i32.div_u, b.i32, b.i32],
-        [b.DivUInt64, m.i64.div_u, b.i64, b.i64],
-        [b.DivFloat32, m.f32.div, b.f32, b.f32],
-        [b.DivFloat64, m.f64.div, b.f64, b.f64],
-        [b.RemSInt32, m.i32.rem_s, b.i32, b.i32],
-        [b.RemSInt64, m.i64.rem_s, b.i64, b.i64],
-        [b.RemUInt32, m.i32.rem_u, b.i32, b.i32],
-        [b.RemUInt64, m.i64.rem_u, b.i64, b.i64],
-        [b.AndInt32, m.i32.and, b.i32, b.i32],
-        [b.AndInt64, m.i64.and, b.i64, b.i64],
-        [b.OrInt32, m.i32.or, b.i32, b.i32],
-        [b.OrInt64, m.i64.or, b.i64, b.i64],
-        [b.XorInt32, m.i32.xor, b.i32, b.i32],
-        [b.XorInt64, m.i64.xor, b.i64, b.i64],
-        [b.ShlInt32, m.i32.shl, b.i32, b.i32],
-        [b.ShlInt64, m.i64.shl, b.i64, b.i64],
-        [b.ShrSInt32, m.i32.shr_s, b.i32, b.i32],
-        [b.ShrSInt64, m.i64.shr_s, b.i64, b.i64],
-        [b.ShrUInt32, m.i32.shr_u, b.i32, b.i32],
-        [b.ShrUInt64, m.i64.shr_u, b.i64, b.i64],
-        [b.RotLInt32, m.i32.rotl, b.i32, b.i32],
-        [b.RotLInt64, m.i64.rotl, b.i64, b.i64],
-        [b.RotRInt32, m.i32.rotr, b.i32, b.i32],
-        [b.RotRInt64, m.i64.rotr, b.i64, b.i64],
-        [b.EqInt32, m.i32.eq, b.i32, b.i32],
-        [b.EqInt64, m.i64.eq, b.i32, b.i64],
-        [b.EqFloat32, m.f32.eq, b.i32, b.f32],
-        [b.EqFloat64, m.f64.eq, b.i32, b.f64],
-        [b.NeInt32, m.i32.ne, b.i32, b.i32],
-        [b.NeInt64, m.i64.ne, b.i32, b.i64],
-        [b.NeFloat32, m.f32.ne, b.i32, b.f32],
-        [b.NeFloat64, m.f64.ne, b.i32, b.f64],
-        [b.LtSInt32, m.i32.lt_s, b.i32, b.i32],
-        [b.LtSInt64, m.i64.lt_s, b.i32, b.i64],
-        [b.LtUInt32, m.i32.lt_u, b.i32, b.i32],
-        [b.LtUInt64, m.i64.lt_u, b.i32, b.i64],
-        [b.LtFloat32, m.f32.lt, b.i32, b.f32],
-        [b.LtFloat64, m.f64.lt, b.i32, b.f64],
-        [b.LeSInt32, m.i32.le_s, b.i32, b.i32],
-        [b.LeSInt64, m.i64.le_s, b.i32, b.i64],
-        [b.LeUInt32, m.i32.le_u, b.i32, b.i32],
-        [b.LeUInt64, m.i64.le_u, b.i32, b.i64],
-        [b.LeFloat32, m.f32.le, b.i32, b.f32],
-        [b.LeFloat64, m.f64.le, b.i32, b.f64],
-        [b.GtSInt32, m.i32.gt_s, b.i32, b.i32],
-        [b.GtSInt64, m.i64.gt_s, b.i32, b.i64],
-        [b.GtUInt32, m.i32.gt_u, b.i32, b.i32],
-        [b.GtUInt64, m.i64.gt_u, b.i32, b.i64],
-        [b.GtFloat32, m.f32.gt, b.i32, b.f32],
-        [b.GtFloat64, m.f64.gt, b.i32, b.f64],
-        [b.GeSInt32, m.i32.ge_s, b.i32, b.i32],
-        [b.GeSInt64, m.i64.ge_s, b.i32, b.i64],
-        [b.GeUInt32, m.i32.ge_u, b.i32, b.i32],
-        [b.GeUInt64, m.i64.ge_u, b.i32, b.i64],
-        [b.GeFloat32, m.f32.ge, b.i32, b.f32],
-        [b.GeFloat64, m.f64.ge, b.i32, b.f64],
-        [b.CopySignFloat32, m.f32.copysign, b.f32, b.f32],
-        [b.CopySignFloat64, m.f64.copysign, b.f64, b.f64],
-        [b.MinFloat32, m.f32.min, b.f32, b.f32],
-        [b.MinFloat64, m.f64.min, b.f64, b.f64],
-        [b.MaxFloat32, m.f32.max, b.f32, b.f32],
-        [b.MaxFloat64, m.f64.max, b.f64, b.f64]
-    ];
-    //console.log(binaryOps);
-    for (let [op, builder, result, operand] of binaryOps) {
-        const name = "binary" + op;
-        const params = b.createType([adapt(operand), adapt(operand)]);
-        const left = m.local.get(0);
-        const right = m.local.get(1);
-        const body = builder(demote(left, operand), demote(right, operand));
-        m.addFunction(name, params, adapt(result), [], promote(body, result));
-        m.addFunctionExport(name, name);
-    }
-    const bytes = m.emitBinary();
-    //console.log(m.emitText());
-
-    const wasm = new WebAssembly.Module(bytes);
-    const instance = new WebAssembly.Instance(wasm, {
-        env: {
-            //
-        }
-    });
-    const exports = instance.exports;
-
-    function maxOp(list) {
-        return Math.max.apply(null, list.map(([op]) => op));
-    }
-    function opArray(prefix, list) {
-        const ops = new Array(maxOp(list));
-        for (let [op] of list) {
-            ops[op] = exports[prefix + op];
-        }
-        return ops;
-    }
-    return {
-        binary: opArray('binary', binaryOps)
-    };
 }
 
 /// Base object for the Interpreter API. Modeled after WebAssembly's base object,
