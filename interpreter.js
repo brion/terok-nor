@@ -141,7 +141,7 @@ class Instance {
 
         // @todo support multiples
         this._memory = null;
-        this._views = null;
+        this._dataView = null;
         this._table = null;
 
         this._ops = null;
@@ -175,25 +175,14 @@ class Instance {
                     this._memory = new Memory(memInit);
                 }
                 const buffer = this._memory.buffer;
-                this._views = {
-                    buffer,
-                    i8: new Int8Array(buffer),
-                    i16: new Int16Array(buffer),
-                    i32: new Int32Array(buffer),
-                    i64: new BigInt64Array(buffer),
-                    u8: new Uint8Array(buffer),
-                    u16: new Uint16Array(buffer),
-                    u32: new Uint32Array(buffer),
-                    u64: new BigUint64Array(buffer),
-                    f32: new Float32Array(buffer),
-                    f64: new Float64Array(buffer)
-                };
+                this._dataView = new DataView(buffer);
                 const numSegments = mod.getNumMemorySegments();
+                const heap = new Uint8Array(buffer);
                 for (let i = 0; i < numSegments; i++) {
                     const segment = mod.getMemorySegmentInfoByIndex(i);
                     if (!segment.passive) {
                         const offset = await evaluateConstant(segment.offset);
-                        this._views.u8.set(offset, segment.data);
+                        heap.set(offset, segment.data);
                     }
                 }
             } else {
@@ -418,20 +407,10 @@ class Instance {
     }
 
     _updateViews() {
-        const views = this._views;
+        const dataView = this._dataView;
         const buffer = this._memory.buffer;
-        if (views.buffer !== buffer) {
-            _views.buffer = buffer;
-            _views.i8 = new Int8Array(buffer);
-            _views.i16 = new Int16Array(buffer);
-            _views.i32 = new Int32Array(buffer);
-            _views.i64 = new BigInt64Array(buffer);
-            _views.u8 = new Uint8Array(buffer);
-            _views.u16 = new Uint16Array(buffer);
-            _views.u32 = new Uint32Array(buffer);
-            _views.u64 = new BigUint64Array(buffer);
-            _views.f32 = new Float32Array(buffer);
-            _views.f64 = new Float64Array(buffer);
+        if (dataView.buffer !== buffer) {
+            this._dataView = new DataView(buffer);
         }
     }
 }
@@ -767,21 +746,12 @@ class Compiler {
                 const instance = ${inst};
                 const table = instance._table;
                 const memory = instance._memory;
-                const views = instance._views;
-                let {buffer, i8, i16, i32, i64, u8, u16, u32, u64, f32, f64} = views;
+                let dataView = instance._dataView;
+                let buffer = dataView.buffer;
                 const updateViews = () => {
                     instance._updateViews();
-                    buffer = views.buffer;
-                    i8 = views.i8;
-                    i16 = views.i16;
-                    i32 = views.i32;
-                    i64 = views.i64;
-                    u8 = views.u8;
-                    u16 = views.u16;
-                    u32 = views.u32;
-                    u64 = views.u64;
-                    f32 = views.f32;
-                    f64 = views.f64;
+                    dataView = instance._dataView;
+                    buffer = dataView.buffer;
                 };
                 ${
                     compiler.maxDepth
@@ -1169,48 +1139,65 @@ class Compiler {
         `);
     }
 
-    memoryView(expr, ptr) {
+    memoryLoad(expr, ptr) {
         const bits = expr.bytes * 8;
         const type = expr.type || getExpressionInfo(expr.value).type;
-        let view, addr;
+        let method;
+        const offset = expr.offset ? `${ptr} + ${expr.offset}` : ptr;
+        const signed = (expr.isSigned || expr.bytes == sizeof(type));
         switch (type) {
             case b.i32:
             case b.i64:
-                view = (expr.isSigned || expr.bytes == sizeof(type)) ? 'i' + bits : 'u' + bits;
+                method = `${signed ? 'getInt' : 'getUint'}${bits}`;
+                let call = `dataView.${method}(${offset}, true)`;
+                if (type === b.i64 && bits < 64) {
+                    return `BigInt(${call})`
+                } else {
+                    return call;
+                }
                 break;
             case b.f32:
             case b.f64:
-                view = 'f' + bits;
-                break;
+                method = `getFloat${bits}`
+                return `dataView.${method}(${offset}, true)`
             default:
                 throw new Error('bad type');
         }
-        switch (expr.bytes) {
-            case 1:
-                addr = `${ptr} >>> 0`;
+    }
+
+    memoryStore(expr, ptr, value) {
+        const bits = expr.bytes * 8;
+        const type = expr.type || getExpressionInfo(expr.value).type;
+        let method;
+        const offset = expr.offset ? `${ptr} + ${expr.offset}` : ptr;
+        switch (type) {
+            case b.i32:
+            case b.i64:
+                method = `setInt${bits}`;
+                let input;
+                if (type === b.i64 && bits < 64) {
+                    input = `Number(BigInt.asIntN(${bits}, ${input}))`
+                } else {
+                    input = value;
+                }
+                let call = `dataView.${method}(${offset}, ${input}, true)`;
+                return call;
                 break;
-            case 2:
-                addr = `${ptr} >>> 1`;
-                break;
-            case 4:
-                addr = `${ptr} >>> 2`;
-                break;
-            case 8:
-                addr = `${ptr} >>> 3`;
-                break;
+            case b.f32:
+            case b.f64:
+                method = `setFloat${bits}`
+                return `dataView.${method}(${offset}, ${value}, true)`
             default:
                 throw new Error('bad type');
         }
-        const offset = expr.offset ? ` + ${expr.offset}` : ``;
-        return `${view}[${addr}${offset}]`;
     }
 
     _compileLoad(expr) {
-        if (fastMemory && expr.align == expr.bytes) {
+        if (fastMemory) {
             // @fixme this faster path using typed arrays for aligned is nice
             // but it won't trap on out of bounds, it'll silently fail
             return this.opcode(expr, [expr.ptr], (result, ptr) =>
-                `${result} = ${this.memoryView(expr, ptr)};`
+                `${result} = ${this.memoryLoad(expr, ptr)};`
             );
         } else {
             // Slow path using function calls into Wasm
@@ -1224,9 +1211,9 @@ class Compiler {
     }
 
     _compileStore(expr) {
-        if (fastMemory && expr.align == expr.bytes) {
+        if (fastMemory) {
             return this.opcode(expr, [expr.ptr, expr.value], (_result, ptr, value) =>
-                `${this.memoryView(expr, ptr)} = ${value};`
+                `${this.memoryStore(expr, ptr, value)};`
             );
         } else {
             // Slow path using function calls into Wasm
