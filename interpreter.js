@@ -930,10 +930,9 @@ class Compiler {
                 {
                     ${(saved = this.saveStack()), ``}
                     ${label = this.label(expr.name)}:
-                    for (;;) {
+                    do {
                         ${this.flatten(expr.children.flatMap((expr) => this.compile(expr)))}
-                        break ${label};
-                    }
+                    } while (false)
                     ${this.restoreStack(saved, resultCount(expr.type))}
                 }
             `);
