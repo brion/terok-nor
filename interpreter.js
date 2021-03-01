@@ -118,8 +118,9 @@ class Instance {
         this._debug = module._debug;
         this._interrupt = false;
         this._singleStep = false;
-        this._breakpoints = new Set();
-        this._breakpointCount = 0;
+        this._breakpoints = [];
+        this._breakpointsActive = 0;
+        this._breakpointNodes = new Map();
         this.debugger = null;
 
         Object.defineProperties(this, {
@@ -318,23 +319,26 @@ class Instance {
     }
 
     setBreakpoint(sourceLocation) {
-        if (!this._breakpoints.has(sourceLocation)) {
-            this._breakpoints.add(sourceLocation);
-            this._breakpointCount++;
+        const index = this._breakpointIndex(sourceLocation);
+        if (!this._breakpoints[index]) {
+            this._breakpoints[index] = true;
+            this._breakpointsActive++;
             this._updateInterrupt();
         }
     }
 
     clearBreakpoint(sourceLocation) {
-        if (this._breakpoints.has(sourceLocation)) {
-            this._breakpoints.delete(sourceLocation);
-            this._breakpointCount--;
+        const index = this._breakpointIndex(sourceLocation);
+        if (this._breakpoints[index]) {
+            this._breakpoints[index] = false;
+            this._breakpointsActive--;
             this._updateInterrupt();
         }
     }
 
     hasBreakpoint(sourceLocation) {
-        return this._breakpoints.has(sourceLocation);
+        const index = this._breakpointIndex(sourceLocation);
+        return this._breakpoints[index];
     }
 
     get singleStep() {
@@ -347,7 +351,18 @@ class Instance {
     }
 
     _updateInterrupt() {
-        this._interrupt = this._singleStep || Boolean(this._breakpointCount);
+        this._interrupt = this._singleStep || Boolean(this._breakpointsActive);
+    }
+
+    _breakpointIndex(sourceLocation) {
+        const nodes = this._breakpointNodes;
+        if (nodes.has(sourceLocation)) {
+            return nodes.get(sourceLocation);
+        } else {
+            const index = this._breakpoints.push(false);
+            nodes.set(sourceLocation, index);
+            return index;
+        }
     }
 
 }
@@ -744,7 +759,7 @@ class Compiler {
         const dirtyPath = (node) => `
             ${node.infallible ? `` : node.spill}
             if (instance._interrupt) {
-                if (instance._singleStep || breakpoints.has(${this.literal(node.sourceLocation)})) {
+                if (instance._singleStep || breakpoints[${this.instance._breakpointIndex(node.sourceLocation)}]) {
                     ${node.infallible ? node.spill : ``}
                     await instance.debugger();
                 }
