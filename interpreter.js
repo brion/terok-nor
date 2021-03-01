@@ -117,8 +117,10 @@ class Instance {
         // For debugging support
         this._debug = module._debug;
         this._interrupt = false;
-        this._singleStep = new Set();
-        this._breakpoints = new Map();
+        this._singleStep = false;
+        this._breakpoints = Object.create(null);
+        this._breakpointCount = 0;
+        this.debugger = null;
 
         Object.defineProperties(this, {
             callback: {
@@ -315,56 +317,37 @@ class Instance {
         return stack.map((dump) => dump());
     }
 
-    setBreakpoint(node, callback) {
-        // @todo use nodes that can be transferred safely, which means
-        // normalizing them from string structs or whatever
-        if (this._breakpoints.has(node)) {
-            this._breakpoints.get(node).push(callback);
-        } else {
-            this._breakpoints.set(node, [callback]);
+    setBreakpoint(sourceLocation) {
+        if (!this._breakpoints[sourceLocation]) {
+            this._breakpoints[sourceLocation] = true;
+            this._breakpointCount++;
+            this._updateInterrupt();
         }
-        this._updateInterrupt();
     }
 
-    clearBreakpoint(node, callback) {
-        if (this._breakpoints.has(node)) {
-            const callbacks = this._breakpoints.get(node);
-            const index = callbacks.indexOf(callback);
-            if (index != -1) {
-                callbacks.splice(index, 1);
-            }
-            if (callbacks.length === 0) {
-                this._breakpoints.delete(node);
-            }
+    clearBreakpoint(sourceLocation) {
+        if (this._breakpoints[sourceLocation]) {
+            delete this._breakpoints[sourceLocation];
+            this._breakpointCount--;
+            this._updateInterrupt();
         }
-        this._updateInterrupt();
     }
 
-    singleStep(callback) {
-        this._singleStep.add(callback);
-        this._updateInterrupt();
+    hasBreakpoint(sourceLocation) {
+        return this._breakpoints.hasOwnProperty(sourceLocation);
     }
 
-    clearSingleStep(callback) {
-        this._singleStep.delete(callback);
+    get singleStep() {
+        return this._singleStep;
+    }
+
+    set singleStep(val) {
+        this._singleStep = Boolean(val);
         this._updateInterrupt();
     }
 
     _updateInterrupt() {
-        this._interrupt =
-            Boolean(this._singleStep.size) ||
-            Boolean(this._breakpoints.size);
-    }
-
-    async _handleInterrupt(sourceLocation) {
-        for (let callback of this._singleStep) {
-            await callback();
-        }
-        if (this._breakpoints.has(sourceLocation)) {
-            for (let callback of this._breakpoints.get(sourceLocation)) {
-                await callback();
-            }
-        }
+        this._interrupt = this._singleStep || Boolean(this._breakpointCount);
     }
 
 }
@@ -689,7 +672,6 @@ class Compiler {
                 let spill;
                 ${instance._debug ? `
                     const breakpoints = instance._breakpoints;
-                    const singleStep = instance._singleStep;
                     const stackSpill = [${
                         Array.from(range(compiler.maxDepth + 1), (_, depth) => {
                             return `
@@ -762,9 +744,9 @@ class Compiler {
         const dirtyPath = (node) => `
             ${node.infallible ? `` : node.spill}
             if (instance._interrupt) {
-                if (singleStep.size || breakpoints.get(${this.literal(node.sourceLocation)})) {
+                if (instance._singleStep || breakpoints[${this.literal(node.sourceLocation)}]) {
                     ${node.infallible ? node.spill : ``}
-                    await instance._handleInterrupt(${this.literal(node.sourceLocation)});
+                    await instance.debugger();
                 }
             }
             ${console.log({node}),node.fragment}

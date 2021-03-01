@@ -56,26 +56,24 @@ const imports = {
     await test(debug.instance);
 
     console.log('Debuggable async execution with a hook:');
-    const single = async () => {
+    debug.instance.debugger = async () => {
         //const frame = debug.instance.stackTrace(0, 1);
         //console.log(frame);
     };
-    debug.instance.singleStep(single);
+    debug.instance.singleStep = true;
     await test(debug.instance);
-    debug.instance.clearSingleStep(single);
+    debug.instance.singleStep = false;
 
     console.log('Debuggable async execution with a breakpoint:');
     const breakpoint = '5581904';
-    const breaker = async () => {
-        /*
-        console.log('breakpoint reached');
-        const frame = debug.instance.stackTrace(0, 1);
-        console.log(frame);
-        */
+    debug.instance.debugger = async () => {
+        //console.log('breakpoint reached');
+        //const frame = debug.instance.stackTrace(0, 1);
+        //console.log(frame);
     };
-    debug.instance.setBreakpoint(breakpoint, breaker);
+    debug.instance.setBreakpoint(breakpoint);
     await test(debug.instance);
-    debug.instance.clearBreakpoint(breakpoint, breaker);
+    debug.instance.clearBreakpoint(breakpoint);
 
     console.log('done.');
 
