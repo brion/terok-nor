@@ -141,7 +141,6 @@ class Instance {
 
         // @todo support multiples
         this._memory = null;
-        this._dataView = null;
         this._table = null;
 
         this._ops = null;
@@ -175,7 +174,6 @@ class Instance {
                     this._memory = new Memory(memInit);
                 }
                 const buffer = this._memory.buffer;
-                this._dataView = new DataView(buffer);
                 const numSegments = mod.getNumMemorySegments();
                 const heap = new Uint8Array(buffer);
                 for (let i = 0; i < numSegments; i++) {
@@ -404,14 +402,6 @@ class Instance {
             this._sequenceIndexes[index] = sequence;
         }
         return sequence;
-    }
-
-    _updateViews() {
-        const dataView = this._dataView;
-        const buffer = this._memory.buffer;
-        if (dataView.buffer !== buffer) {
-            this._dataView = new DataView(buffer);
-        }
     }
 }
 
@@ -746,12 +736,11 @@ class Compiler {
                 const instance = ${inst};
                 const table = instance._table;
                 const memory = instance._memory;
-                let dataView = instance._dataView;
-                let buffer = dataView.buffer;
+                let buffer = memory.buffer;
+                let dataView = new DataView(buffer);
                 const updateViews = () => {
-                    instance._updateViews();
-                    dataView = instance._dataView;
-                    buffer = dataView.buffer;
+                    buffer = memory.buffer;
+                    dataView = new DataView(buffer);
                 };
                 ${
                     compiler.maxDepth
@@ -845,14 +834,14 @@ class Compiler {
                 nodes.map((node) => node.sourceLocation)
             );
             return `
+                ${nodes.filter((node) => node.memory).length ? `
+                if (buffer !== memory.buffer) {
+                    updateViews();
+                }
+                `: ``}
                 if (activeSequences[${sequence}]) {
                     ${nodes.map(dirtyPath).join('\n')}
                 } else {
-                    ${nodes.filter((node) => node.memory).length ? `
-                        if (buffer !== memory.buffer) {
-                            updateViews();
-                        }
-                    `: ``}
                     ${nodes.map(cleanPath).join('\n')}
                 }
             `;
