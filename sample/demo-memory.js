@@ -16,28 +16,29 @@ const imports = {
 
     async function test(name, setup, after=null) {
         const instance = await setup();
+        const exports = instance.exports;
 
+        async function time(name, cb) {
+            const start = Date.now();
+            await cb();
+            const delta = Date.now() - start;
+            console.log(`${name} in ${delta} ms`);
+        }
         for (let i = 0; i < repeat; i++) {
             console.log(`${name} (iteration ${i + 1} of ${repeat})`);
 
-            const start = Date.now();
-            //await instance.exports.process_all();
-
-            await instance.exports.process_i8();
-            await instance.exports.process_i16();
-            await instance.exports.process_i32();
+            await time('process_i8', exports.process_i8);
+            await time('process_i16', exports.process_i16);
+            await time('process_i32', exports.process_i32);
             if (instance instanceof WebAssembly.Instance) {
                 // skip i64
                 // bignum integration is not deployed yet on v8
             } else {
-                await instance.exports.process_i64();
+                await time('process_i64', exports.process_i64);
             }
-            await instance.exports.process_f32();
-            await instance.exports.process_f64();
+            await time('process_f32', exports.process_f32);
+            await time('process_f64', instance.exports.process_f64);
 
-            const delta = Date.now() - start;
-
-            console.log(delta + ' ms');
             console.log('');
         }
         if (after) {
