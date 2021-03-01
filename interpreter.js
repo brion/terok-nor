@@ -109,6 +109,13 @@ class Module {
     }
 }
 
+function extendInts(arr) {
+    // @todo extend in larger increments ;)
+    const extended = new Int32Array(arr.length + 1);
+    extended.set(arr);
+    return extended;
+}
+
 class Instance {
 
     constructor(module, imports) {
@@ -118,9 +125,12 @@ class Instance {
         this._debug = module._debug;
         this._interrupt = false;
         this._singleStep = 0;
-        this._breakpoints = new Uint8Array();
+        this._breakpoints = new Int32Array();
+        this._breakpointSequences = new Int32Array();
         this._breakpointsActive = 0;
         this._breakpointNodes = new Map();
+        this._sequences = [];
+        this._sequencesActive = new Int32Array();
         this.debugger = null;
 
         Object.defineProperties(this, {
@@ -324,6 +334,11 @@ class Instance {
             this._breakpoints[index] = 1;
             this._breakpointsActive++;
             this._updateInterrupt();
+
+            const sequence = this._breakpointSequences[index];
+            if (sequence > -1) {
+                this._sequencesActive[sequence]++;
+            }
         }
     }
 
@@ -333,6 +348,11 @@ class Instance {
             this._breakpoints[index] = 0;
             this._breakpointsActive--;
             this._updateInterrupt();
+
+            const sequence = this._breakpointSequences[index];
+            if (sequence > -1) {
+                this._sequencesActive[sequence]--;
+            }
         }
     }
 
@@ -363,15 +383,25 @@ class Instance {
             //const index = this._breakpoints.push(false) - 1;
 
             const index = this._breakpoints.length;
-            const extended = new Uint8Array(index + 1);
-            extended.set(this._breakpoints);
-            this._breakpoints = extended; // hack hack hack test
+            this._breakpoints = extendInts(this._breakpoints);
+            this._breakpointSequences = extendInts(this._breakpointSequences);
+            this._breakpointSequences[index] = -1;
 
             nodes.set(sourceLocation, index);
             return index;
         }
     }
 
+    _registerSequence(sourceLocations) {
+        const indexes = sourceLocations.map((loc) => this._breakpointIndex(loc));
+        const sequence = this._sequences.push(indexes) - 1;
+        this._sequencesActive = extendInts(this._sequencesActive);
+        for (let loc of sourceLocations) {
+            const index = this._breakpointIndex(loc);
+            this._breakpointSequences[index] = sequence;
+        }
+        return sequence;
+    }
 }
 
 /// Parse a module from binary form and prepare it to be instantiated later.
@@ -622,9 +652,11 @@ function uninterruptible(expr) {
             //return info.children.filter(uninterruptible).length == info.children.length;
             return false;
         case b.IfId:
+            return false;
             return uninterruptible(info.ifTrue) &&
                 (!info.ifFalse || uninterruptible(info.true))
         case b.LoopId:
+            return false;
             return uninterruptible(info.body);
         case b.BreakId:
             return true;
@@ -694,6 +726,7 @@ class Compiler {
                 let spill;
                 ${instance._debug ? `
                     const breakpoints = instance._breakpoints;
+                    const sequencesActive = instance._sequencesActive;
                     const stackSpill = [${
                         Array.from(range(compiler.maxDepth + 1), (_, depth) => {
                             return `
@@ -774,13 +807,18 @@ class Compiler {
             }
             ${node.fragment}
         `;
-        const bifurcate = (nodes) => `
-            if (instance._interrupt) {
-                ${nodes.map(dirtyPath).join('\n')}
-            } else {
-                ${nodes.map(cleanPath).join('\n')}
-            }
-        `;
+        const bifurcate = (nodes) => {
+            const sequence = this.instance._registerSequence(
+                nodes.map((node) => node.sourceLocation)
+            );
+            return `
+                if (instance._singleStep | sequencesActive[${sequence}]) {
+                    ${nodes.map(dirtyPath).join('\n')}
+                } else {
+                    ${nodes.map(cleanPath).join('\n')}
+                }
+            `;
+        };
         if (this.instance._debug) {
             let source = ``;
             const streak = [];

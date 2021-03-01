@@ -61,18 +61,21 @@ const imports = {
     await test(debug.instance);
 
     console.log('Debuggable async execution with an un-hit breakpoint:');
-    //const breakpoint = '5581904';
-    const breakpoint = 'fake_location';
+    const breakpoint = '5581904';
+    //const breakpoint = 'fake_location';
+    let counted = 0;
     debug.instance.debugger = async () => {
-        console.log('breakpoint reached');
-        const frame = debug.instance.stackTrace(0, 1);
-        console.log(frame);
+        //console.log('breakpoint reached');
+        //const frame = debug.instance.stackTrace(0, 1);
+        //console.log(frame);
+        counted++;
     };
     debug.instance.setBreakpoint(breakpoint);
     await test(debug.instance);
     debug.instance.clearBreakpoint(breakpoint);
+    console.log(`Hit breakpoint ${counted} times!`);
 
-    console.log('done.');
+    process.exit(1);
 
     console.log('Debuggable async execution with a single-step hook:');
     debug.instance.debugger = async () => {
@@ -83,5 +86,8 @@ const imports = {
     await test(debug.instance);
     debug.instance.singleStep = false;
 
+    console.log('done.');
+
+    //console.log(debug.instance.exports.iterate_mandelbrot.toString());
 
 })();
