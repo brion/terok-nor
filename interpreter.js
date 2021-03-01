@@ -596,6 +596,17 @@ function getExpressionInfo(expr) {
     }
 }
 
+function memoryExpression(expr) {
+    const info = getExpressionInfo(expr);
+    switch (info.id) {
+        case b.LoadId:
+        case b.StoreId:
+            return true;
+        default:
+            return false;
+    }
+}
+
 function infallible(expr) {
     const info = getExpressionInfo(expr);
     switch (info.id) {
@@ -726,8 +737,24 @@ class Compiler {
         const func = `
             return async (${paramNames.join(', ')}) => {
                 const instance = ${inst};
-                const views = instance._views;
                 const table = instance._table;
+                const memory = instance._memory;
+                const views = instance._views;
+                let {buffer, i8, i16, i32, i64, u8, u16, u32, u64, f32, f64} = views;
+                const updateViews = () => {
+                    instance._updateViews();
+                    buffer = views.buffer;
+                    i8 = views.i8;
+                    i16 = views.i16;
+                    i32 = views.i32;
+                    i64 = views.i64;
+                    u8 = views.u8;
+                    u16 = views.u16;
+                    u32 = views.u32;
+                    u64 = views.u64;
+                    f32 = views.f32;
+                    f64 = views.f64;
+                };
                 ${
                     compiler.maxDepth
                     ? `let ${compiler.stackVars(compiler.maxDepth).join(`, `)};`
@@ -810,6 +837,11 @@ class Compiler {
             if (instance._singleStep | activeBreakpoints[${this.instance._breakpointIndex(node.sourceLocation)}]) {
                 ${node.infallible ? node.spill : ``}
                 await instance.debugger();
+                ${node.memory ? `
+                    if (buffer !== memory.buffer) {
+                        updateViews();
+                    }
+                ` : ``}
             }
             ${node.fragment}
         `;
@@ -821,6 +853,11 @@ class Compiler {
                 if (instance._singleStep | activeSequences[${sequence}]) {
                     ${nodes.map(dirtyPath).join('\n')}
                 } else {
+                    ${nodes.filter((node) => node.memory).length ? `
+                        if (buffer !== memory.buffer) {
+                            updateViews();
+                        }
+                    `: ``}
                     ${nodes.map(cleanPath).join('\n')}
                 }
             `;
@@ -915,6 +952,7 @@ class Compiler {
             uninterruptible: uninterruptible(expr),
             infallible: infallible(expr),
             fragment: builder(result, ...stackVars),
+            memory: memoryExpression(expr),
             spill
         });
 
@@ -1143,8 +1181,10 @@ class Compiler {
 
     _compileLoad(expr) {
         if (fastMemory && expr.align == expr.bytes) {
+            // @fixme this faster path using typed arrays for aligned is nice
+            // but it won't trap on out of bounds, it'll silently fail
             return this.opcode(expr, [expr.ptr], (result, ptr) =>
-                `${result} = ${coerceValue(expr.type, this.memoryView(expr, ptr))};`
+                `${result} = ${this.memoryView(expr, ptr)};`
             );
         } else {
             // Slow path using function calls into Wasm
