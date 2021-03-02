@@ -796,10 +796,10 @@ const reinterpretView = new DataView(reinterpretBuffer);
 let letters = Array.from(range(26)).map((n) => String.fromCharCode(n + "a".charCodeAt(0)));
 function letter(n) {
     let suffix = '';
-    while (n > 26) {
+    do {
         suffix = letters[n % 26] + suffix;
         n = Math.trunc(n / 26);
-    }
+    } while (n > 0);
     return suffix;
 }
 
@@ -821,6 +821,9 @@ class Stack {
     }
 
     get(index) {
+        if (index < 0) {
+            index = this.depth + index;
+        }
         const u32 = index >>> 0;
         if (u32 >= this.depth || u32 !== index) {
             throw new RangeError('invalid index');
@@ -940,7 +943,7 @@ class Compiler {
         `;
         const closureNames = compiler.closure.map((val) => compiler.enclose(val));
         const args = closureNames.concat([func]);
-        console.log(func);
+        //console.log(func);
         return Reflect.construct(Function, args).apply(null, compiler.closure);
     }
 
@@ -986,6 +989,12 @@ class Compiler {
             }
             ${node.fragment}
         `;
+        const collapse = (nodes, callback) => {
+            if (nodes.length == 0) {
+                return `/* empty block */`;
+            }
+            return nodes.map(callback).join('\n');
+        };
         const bifurcate = (nodes) => {
             const sequence = this.instance._registerSequence(
                 nodes.map((node) => node.sourceLocation)
@@ -997,9 +1006,9 @@ class Compiler {
                 }
                 `: ``}
                 if (activeSequences[${sequence}]) {
-                    ${nodes.map(dirtyPath).join('\n')}
+                    ${collapse(nodes, dirtyPath)}
                 } else {
-                    ${nodes.map(cleanPath).join('\n')}
+                    ${collapse(nodes, cleanPath)}
                 }
             `;
         };
@@ -1080,7 +1089,13 @@ class Compiler {
         this.blocks.push(block);
         const prefix = this.declareTemp(block);
         const suffix = this.pushTemp(block);
-        return [prefix, callback(block), suffix].join('\n');
+        const content = callback(block);
+        if (block.result) {
+            // must be stored via stashTemp first!
+            this.pop();
+        }
+
+        return [prefix, content, suffix].join('\n');
     }
 
     findBlock(name) {
@@ -1140,11 +1155,12 @@ class Compiler {
                 }
                 let fragment = builder(result, ...stackVars);
                 nodes.push({
+                    stackDepth: this.stack.depth,
+                    result,
                     sourceLocation: expr.sourceLocation,
                     uninterruptible: uninterruptible(expr),
                     infallible: infallible(expr),
                     fragment,
-                    optimized: this.canOptimize() ? fragment : null,
                     memory: memoryExpression(expr),
                     spill
                 });
@@ -1155,16 +1171,14 @@ class Compiler {
             const nodes = this.optimizedStack.block(false, build);
 
             // and also in opt mode
-            if (infallible(expr)) {
-                if (expr.type != b.none) {
-                    this.pop();
-                }
-    
-                const opt = this.optimizedStack.block(true, build);
-                nodes.forEach((node, index) => {
-                    node.optimized = opt[index].optimized
-                });
+            if (expr.type != b.none) {
+                this.pop();
             }
+
+            const opt = this.optimizedStack.block(true, build);
+            nodes.forEach((node, index) => {
+                node.optimized = opt[index].fragment
+            });
 
             return nodes;
     });
@@ -1193,25 +1207,34 @@ class Compiler {
         });
     }
 
-    optimizeVar(name) {
+    optimizeVar(name, expr) {
+        //console.log({variant: {expr, name}});
         let variants;
         if (this.optimizedVars.has(name)) {
             variants = this.optimizedVars.get(name);
         } else {
-            variants = [];
-            this.optimizedVars.set(name, variants)
+            variants = new Map();
+            this.optimizedVars.set(name, variants);
         }
-        const index = variants.length;
+        if (variants.has(expr.sourceLocation)) {
+            return variants.get(expr.sourceLocation);
+        }
+        const index = variants.size;
         const suffix = letter(index);
         const opt = `${name}${suffix}`;
-        variants.push(opt);
+        //console.log(`creating var ${opt}`, expr);
+        variants.set(expr.sourceLocation, opt);
         return opt;
     }
 
-    canOptimize() {
+    optimizeMode(depth = 0) {
+        return (this.optimizedStack.depth > 0) && this.optimizedStack.get(depth);
+    }
+
+    canOptimize(depth = 0) {
         const always = !this.instance._debug;
-        const avail = (this.optimizedStack.depth == 0) || this.optimizedStack.current;
-        const able = this.expressions.depth && infallible(this.expressions.current);
+        const avail = this.optimizeMode();
+        const able = (this.expressions.depth > 0) && infallible(this.expressions.get(depth));
         return always || (avail && able);
     }
 
@@ -1219,11 +1242,13 @@ class Compiler {
         const index = this.stack.depth;
         const name = `stack${index}`;
 
-        const opt = this.optimizeVar(name);
-        this.stack.push(opt);
-        if (this.canOptimize()) {
+        //if (this.canOptimize() && this.canOptimize(-1)) {
+        if (this.canOptimize(-1)) {
+            const opt = this.optimizeVar(name, expr);
+            this.stack.push(opt);
             return `const ${opt}`;
         } else {
+            this.stack.push(name);
             return `${name}`;
         }
     }
@@ -1257,13 +1282,6 @@ class Compiler {
         return null;
     }
 
-    resultStore(result) {
-        if (result) {
-            return `/* store */ ${result} = ${this.pop()};`;
-        }
-        return ``;
-    }
-
     declareTemp(block) {
         if (block.temp) {
             return `let ${block.temp};`;
@@ -1280,7 +1298,7 @@ class Compiler {
 
     stashTemp(block) {
         if (block.temp) {
-            return `/* stashTemp */ ${block.temp} = ${this.pop()};`
+            return `/* stashTemp */ ${block.temp} = ${this.peek()};`
         }
         return ``;
     }
@@ -1300,7 +1318,6 @@ class Compiler {
     }
 
     _compileIf(expr) {
-        let block;
         return this.opcode(expr, [expr.condition], (result, condition) =>
             this.block(result, null, (block) => `
                 if (${condition}) {
@@ -1394,7 +1411,12 @@ class Compiler {
     }
 
     _compileLocalSet(expr) {
-        return this.opcode(expr, [expr.value], (result, value) => `
+        if (expr.isTee) {
+            return this.opcode(expr, [expr.value], (result, value) => `
+                ${result} = ${this.local(expr.index)} = ${value};
+            `);
+        }
+        return this.opcode(expr, [expr.value], (_result, value) => `
             ${this.local(expr.index)} = ${value};
         `);
     }
