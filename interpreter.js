@@ -825,7 +825,7 @@ class Stack {
         if (u32 >= this.depth || u32 !== index) {
             throw new RangeError('invalid index');
         }
-        return this.stack[u32];
+        return this.items[u32];
     }
 
     push(val) {
@@ -940,6 +940,7 @@ class Compiler {
         `;
         const closureNames = compiler.closure.map((val) => compiler.enclose(val));
         const args = closureNames.concat([func]);
+        //console.log(func);
         return Reflect.construct(Function, args).apply(null, compiler.closure);
     }
 
@@ -1151,7 +1152,6 @@ class Compiler {
         const nodes = this.optimizedStack.block(false, build);
 
         // @fixme fix this
-        /*
         if (infal) {
             // Our child nodes can't be interrupted or throw.
             // Re-compile with higher optimizations where possible.
@@ -1170,7 +1170,6 @@ class Compiler {
                 }
             });
         }
-        */
 
         return nodes;
     }
@@ -1214,38 +1213,39 @@ class Compiler {
     }
 
     canOptimize() {
-        return this.optimizedStack.current && infallible(this.expressions.current);
+        return this.optimizedStack.depth && this.optimizedStack.current && infallible(this.expressions.current);
     }
 
     pushVar() {
         const index = this.stack.depth;
         const name = `stack${index}`;
 
-        const depth = index + 1;
-        if (depth > this.maxDepth) {
-            this.maxDepth = depth;
-        }
-
+        const opt = this.optimizeVar(name);
+        this.stack.push(opt);
         if (this.canOptimize()) {
-            const opt = this.optimizeVar(name);
-            this.stack.push(opt);
             return `const ${opt}`;
         } else {
-            this.stack.push(name);
             return `${name}`;
         }
     }
 
     pop() {
-        return this.stack.pop();
+        const name = this.stackVar(this.stack.depth - 1);
+        this.stack.pop();
+        return name;
     }
 
     peek() {
-        return this.stack.peek();
+        const name = this.stackVar(this.stack.depth - 1);
+        return name;
     }
 
     stackVar(index) {
-        return this.stack.get(index);
+        if (this.canOptimize()) {
+            return this.stack.get(index);
+        } else {
+            return `stack${index}`;
+        }
     }
 
     temp(type) {
@@ -1281,8 +1281,7 @@ class Compiler {
 
     stashTemp(block) {
         if (block.temp) {
-            const source = this.pop();
-            return `${block.temp} = ${source};`
+            return `/* stashTemp */ ${block.temp} = ${this.pop()};`
         }
         return ``;
     }

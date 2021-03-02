@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const {Interpreter} = require('../index.js');
+const {collect} = require('./utils.js');
 
 const wasm = fs.readFileSync(path.join(__dirname, 'mandelbrot.wasm'));
 const imports = {
@@ -76,7 +77,7 @@ const imports = {
     const source = path.join(__dirname, 'compiled-mandelbrot.js');
     fs.writeFileSync(
         source,
-        (await optimized()).exports.iterate_mandelbrot.toString()
+        collect(await optimized())
     );
     console.log(`wrote source to ${source}`);
     console.log(``);
@@ -85,7 +86,7 @@ const imports = {
     const sourceDebug = path.join(__dirname, 'compiled-mandelbrot-debug.js');
     fs.writeFileSync(
         sourceDebug,
-        (await debug()).exports.iterate_mandelbrot.toString()
+        collect(await debug())
     );
     console.log(`wrote source to ${sourceDebug}`);
     console.log(``);

@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const {Interpreter} = require('../index.js');
+const {collect} = require('./utils.js');
 
 const wasm = fs.readFileSync(path.join(__dirname, 'memory.wasm'));
 const imports = {
@@ -59,15 +60,6 @@ const imports = {
     }
 
     await test('Native sync execution', native);
-
-    
-    function collect(instance) {
-        const sources = [];
-        for (let [name, func] of Object.entries(instance.exports)) {
-            sources.push(`const ${name} = ${func.toString()};`);
-        }
-        return sources.join('\n\n');
-    }
 
     const source = path.join(__dirname, 'compiled-memory.js');
     fs.writeFileSync(source, collect(await optimized()));
