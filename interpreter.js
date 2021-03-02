@@ -940,7 +940,7 @@ class Compiler {
         `;
         const closureNames = compiler.closure.map((val) => compiler.enclose(val));
         const args = closureNames.concat([func]);
-        //console.log(func);
+        console.log(func);
         return Reflect.construct(Function, args).apply(null, compiler.closure);
     }
 
@@ -968,7 +968,10 @@ class Compiler {
     flatten(nodes) {
         const cleanPath = (node) => `
             ${node.infallible ? `` : node.spill}
-            ${node.fragment}
+            ${node.infallible
+                ? `/* optimized */ ${node.optimized}`
+                : `/* de-opt */ ${node.fragment}`
+            }
         `;
         const dirtyPath = (node) => `
             ${node.infallible ? `` : node.spill}
@@ -1109,69 +1112,62 @@ class Compiler {
     }
 
     opcode(expr, args, builder) {
-        const infal = infallible(expr);
         const spill = this.spill(expr);
 
-        const build = () => this.expressions.block(expr, () => {
+        return this.expressions.block(expr, () => {
             // Note we use 'args' for block children which
             // may or may not have return values, so we have
             // to check them all.
-            const nodes = [];
-            let inputs = 0;
-            for (let arg of args) {
-                const argNodes = this.compile(arg);
-                nodes.push(...argNodes);
-                if (getExpressionInfo(arg).type != b.none) {
-                    inputs++;
+            const build = () => {
+                const nodes = [];
+                let inputs = 0;
+                for (let arg of args) {
+                    const argNodes = this.compile(arg);
+                    nodes.push(...argNodes);
+                    if (getExpressionInfo(arg).type != b.none) {
+                        inputs++;
+                    }
                 }
-            }
-            const stackVars = [];
-            for (let _i of range(inputs)) {
-                stackVars.unshift(this.pop());
+                const stackVars = [];
+                for (let _i of range(inputs)) {
+                    stackVars.unshift(this.pop());
+                }
+    
+                let result;
+                if (expr.type != b.none) {
+                    // Get the stack variable name for the value pushed by the opcode
+                    result = this.pushVar(expr);
+                }
+                let fragment = builder(result, ...stackVars);
+                nodes.push({
+                    sourceLocation: expr.sourceLocation,
+                    uninterruptible: uninterruptible(expr),
+                    infallible: infallible(expr),
+                    fragment,
+                    optimized: this.canOptimize() ? fragment : null,
+                    memory: memoryExpression(expr),
+                    spill
+                });
+                return nodes;
+            };
+
+            // Run everything in de-opt
+            const nodes = this.optimizedStack.block(false, build);
+
+            // and also in opt mode
+            if (infallible(expr)) {
+                if (expr.type != b.none) {
+                    this.pop();
+                }
+    
+                const opt = this.optimizedStack.block(true, build);
+                nodes.forEach((node, index) => {
+                    node.optimized = opt[index].optimized
+                });
             }
 
-            let result;
-            if (expr.type != b.none) {
-                // Get the stack variable name for the value pushed by the opcode
-                result = this.pushVar();
-            }
-            let fragment = builder(result, ...stackVars);
-            nodes.push({
-                sourceLocation: expr.sourceLocation,
-                uninterruptible: uninterruptible(expr),
-                infallible: infal,
-                fragment,
-                optimized: null,
-                memory: memoryExpression(expr),
-                spill
-            });
             return nodes;
-        });
-
-        // First build the full non-optimized code.
-        const nodes = this.optimizedStack.block(false, build);
-
-        // @fixme fix this
-        if (infal) {
-            // Our child nodes can't be interrupted or throw.
-            // Re-compile with higher optimizations where possible.
-
-            if (expr.type != b.none) {
-                // Hack: pop the result back off the virtual stack
-                this.pop();
-            }
-
-            const optimized = this.optimizedStack.block(true, build);
-
-            // this feels like a ..... hack
-            nodes.forEach((node, index) => {
-                if (node.infallible) {
-                    node.optimized = optimized[index].fragment;
-                }
-            });
-        }
-
-        return nodes;
+    });
     }
 
     vars(base, max) {
@@ -1213,10 +1209,13 @@ class Compiler {
     }
 
     canOptimize() {
-        return this.optimizedStack.depth && this.optimizedStack.current && infallible(this.expressions.current);
+        const always = !this.instance._debug;
+        const avail = (this.optimizedStack.depth == 0) || this.optimizedStack.current;
+        const able = this.expressions.depth && infallible(this.expressions.current);
+        return always || (avail && able);
     }
 
-    pushVar() {
+    pushVar(expr) {
         const index = this.stack.depth;
         const name = `stack${index}`;
 

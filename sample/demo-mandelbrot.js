@@ -108,7 +108,7 @@ const imports = {
 
         // hack to find a live breakpoint
         const nodes = Array.from(instance._breakpointIndexes.keys());
-        breakpoint = nodes[Math.round((nodes.length - 1) / 2)];
+        breakpoint = nodes[Math.round((nodes.length - 1) * 3 / 5)];
 
         instance.debugger = async () => {
             counted++;
