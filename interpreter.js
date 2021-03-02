@@ -617,21 +617,21 @@ function memoryExpression(expr) {
     }
 }
 
+// returning true for the opcode itself, not the arguments
+// for blocks the branches/children count.
 const infallible = Cache.make((expr) => {
     const info = getExpressionInfo(expr);
     switch (info.id) {
         case b.BlockId:
             return info.children.filter(infallible).length == info.children.length;
         case b.IfId:
-            return infallible(info.condition) &&
-                infallible(info.ifTrue) &&
+            return infallible(info.ifTrue) &&
                 (!info.ifFalse || infallible(info.true))
         case b.LoopId:
             return infallible(info.body);
         case b.BreakId:
-            return !info.condition || infallible(info.condition);
         case b.SwitchId:
-            return infallible(info.condition);
+            return true
         case b.CallId:
             // @todo analyze all statically linked internal functions
             // and pass through a true if possible
@@ -646,9 +646,9 @@ const infallible = Cache.make((expr) => {
         case b.StoreId:
             return false;
         case b.ConstId:
-            return true;
         case b.UnaryId:
-            return infallible(info.value);
+            // @fixme there may be fallible unary ops like sqrt
+            return true;
         case b.BinaryId:
             switch (info.op) {
                 case b.DivSInt32:
@@ -657,18 +657,15 @@ const infallible = Cache.make((expr) => {
                 case b.DivFloat64:
                     return false;
                 default:
-                    return infallible(info.left) &&
-                    infallible(info.right);
+                    return true;
             }
         case b.SelectId:
-            return infallible(info.ifTrue) &&
-                infallible(info.ifFalse) &&
-                infallible(info.condition);
         case b.DropId:
         case b.ReturnId:
         case b.MemorySizeId:
             return true;
         case b.MemoryGrowId:
+            // @fixme is this fallible or does it just return 0?
             return false;
         case b.NopId:
             return true;
@@ -885,7 +882,7 @@ class Compiler {
         const compiler = new Compiler(instance, params, vars);
         const inst = compiler.enclose(instance);
         const paramNames = params.map((_type, index) => `param${index}`);
-        const body = compiler.flatten(compiler.compile(expr));
+        const {body, result} = compiler.flatten(compiler.compile(expr));
         const hasResult = (results !== b.none);
         const maxDepth = compiler.stack.maxDepth;
         const func = `
@@ -935,7 +932,7 @@ class Compiler {
                 instance._stackTracers.push(dump);
                 try {
                     ${body}
-                    ${hasResult ? `return ${compiler.pop()};` : ``}
+                    ${hasResult ? `return ${result};` : ``}
                 } finally {
                     instance._stackTracers.pop();
                 }
@@ -943,7 +940,7 @@ class Compiler {
         `;
         const closureNames = compiler.closure.map((val) => compiler.enclose(val));
         const args = closureNames.concat([func]);
-        //console.log(func);
+        console.log(func);
         return Reflect.construct(Function, args).apply(null, compiler.closure);
     }
 
@@ -969,26 +966,34 @@ class Compiler {
     }
 
     flatten(nodes) {
-        const cleanPath = (node) => `
-            ${node.infallible ? `` : node.spill}
-            ${node.infallible
-                ? `/* optimized */ ${node.optimized}`
-                : `/* de-opt */ ${node.fragment}`
+        let result;
+        const cleanPath = (node) => {
+            if (node.result) {
+                result = node.result;
             }
-        `;
-        const dirtyPath = (node) => `
-            ${node.infallible ? `` : node.spill}
-            if (activeBreakpoints[${this.instance._breakpointIndex(node.sourceLocation)}]) {
-                ${node.infallible ? node.spill : ``}
-                await instance.debugger();
-                ${node.memory ? `
-                    if (buffer !== memory.buffer) {
-                        updateViews();
-                    }
-                ` : ``}
+            if (node.infallible) {
+                return `/* optimized */ ${node.optimized}`;
+            } else {
+                return `/* de-opt */ ${node.spill} ${node.fragment}`;
             }
-            ${node.fragment}
-        `;
+        };
+        const dirtyPath = (node) => {
+            if (node.result) {
+                result = node.result;
+            }
+            return `${node.infallible ? `` : node.spill}
+                if (activeBreakpoints[${this.instance._breakpointIndex(node.sourceLocation)}]) {
+                    ${node.infallible ? node.spill : ``}
+                    await instance.debugger();
+                    ${node.memory ? `
+                        if (buffer !== memory.buffer) {
+                            updateViews();
+                        }
+                    ` : ``}
+                }
+                ${node.fragment}
+            `;
+        };
         const collapse = (nodes, callback) => {
             if (nodes.length == 0) {
                 return `/* empty block */`;
@@ -1013,6 +1018,7 @@ class Compiler {
             `;
         };
         if (this.instance._debug) {
+            let result = null;
             let source = ``;
             const streak = [];
             const spillStreak = () => {
@@ -1032,11 +1038,15 @@ class Compiler {
                 }
             }
             spillStreak();
-            return source;
+            return {
+                body: source,
+                result
+            };
         } else {
-            return `
-                ${nodes.map(cleanPath).join('\n')}
-            `;
+            return {
+                body: nodes.map(cleanPath).join('\n'),
+                result
+            };
         }
     }
 
@@ -1148,15 +1158,17 @@ class Compiler {
                     stackVars.unshift(this.pop());
                 }
     
-                let result;
+                let result, resultDecl;
                 if (expr.type != b.none) {
                     // Get the stack variable name for the value pushed by the opcode
-                    result = this.pushVar(expr);
+                    resultDecl = this.pushVar(expr);
+                    result = this.peek();
                 }
-                let fragment = builder(result, ...stackVars);
+                let fragment = builder(resultDecl, ...stackVars);
                 nodes.push({
                     stackDepth: this.stack.depth,
                     result,
+                    resultDecl,
                     sourceLocation: expr.sourceLocation,
                     uninterruptible: uninterruptible(expr),
                     infallible: infallible(expr),
@@ -1172,7 +1184,9 @@ class Compiler {
 
             // and also in opt mode
             if (expr.type != b.none) {
-                this.pop();
+                // Hack to get the result var off the stack
+                // without polluting state
+                this.stack.pop();
             }
 
             const opt = this.optimizedStack.block(true, build);
@@ -1228,22 +1242,32 @@ class Compiler {
     }
 
     optimizeMode(depth = 0) {
-        return (this.optimizedStack.depth > 0) && this.optimizedStack.get(depth);
+        return this.optimizedStack.get(depth);
     }
 
-    canOptimize(depth = 0) {
-        const always = !this.instance._debug;
-        const avail = this.optimizeMode();
-        const able = (this.expressions.depth > 0) && infallible(this.expressions.get(depth));
-        return always || (avail && able);
+    canOptimizeResult() {
+        if (!this.instance._debug) {
+            // Always optimize if compiling with debug off
+            return true;
+        }
+        if (!this.optimizeMode()) {
+            // Never optimize in the debug-mode path
+            return false;
+        }
+        if (this.expressions.depth == 0) {
+            // No remaining consumer expression
+            return false;
+        }
+        // If the consumer of the result is infallible, they
+        // won't need to dump our data on a stacktrace.
+        return infallible(this.expressions.get(-1));
     }
 
     pushVar(expr) {
         const index = this.stack.depth;
         const name = `stack${index}`;
 
-        //if (this.canOptimize() && this.canOptimize(-1)) {
-        if (this.canOptimize(-1)) {
+        if (this.canOptimizeResult()) {
             const opt = this.optimizeVar(name, expr);
             this.stack.push(opt);
             return `const ${opt}`;
@@ -1254,22 +1278,11 @@ class Compiler {
     }
 
     pop() {
-        const name = this.stackVar(this.stack.depth - 1);
-        this.stack.pop();
-        return name;
+        return this.stack.pop();
     }
 
     peek() {
-        const name = this.stackVar(this.stack.depth - 1);
-        return name;
-    }
-
-    stackVar(index) {
-        if (this.canOptimize()) {
-            return this.stack.get(index);
-        } else {
-            return `stack${index}`;
-        }
+        return this.stack.current;
     }
 
     temp(type) {
@@ -1310,7 +1323,7 @@ class Compiler {
                 {
                     ${this.flatten(
                         expr.children.flatMap((expr) => this.compile(expr))
-                    )}
+                    ).body}
                     ${this.stashTemp(block)}
                 }
             `)
@@ -1321,10 +1334,10 @@ class Compiler {
         return this.opcode(expr, [expr.condition], (result, condition) =>
             this.block(result, null, (block) => `
                 if (${condition}) {
-                    ${this.flatten(this.compile(expr.ifTrue))}
+                    ${this.flatten(this.compile(expr.ifTrue)).body}
                     ${this.stashTemp(block)}
                 } ${expr.ifFalse ? `else {
-                    ${this.flatten(this.compile(expr.ifFalse))}
+                    ${this.flatten(this.compile(expr.ifFalse)).body}
                     ${this.stashTemp(block)}
                 }` : ``}
             `)
@@ -1339,7 +1352,7 @@ class Compiler {
                 for (;;) {
                     ${this.labelDecl(block)}
                     {
-                        ${this.flatten(this.compile(expr.body))}
+                        ${this.flatten(this.compile(expr.body)).body}
                         ${this.stashTemp(block)}
                         break ${outer};
                     }
