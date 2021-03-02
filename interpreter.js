@@ -571,19 +571,40 @@ function* range(end) {
     }
 }
 
-function getExpressionInfo(expr) {
-    if (typeof expr === 'object') {
-        return expr;
-    } else {
-        // Keep the reference ID on the info object as we pass it around.
-        // This is a placeholder until we can retain source locations that
-        // make sense (eg against the binary, or against a generated text
-        // disassembly).
-        const info = b.getExpressionInfo(expr);
-        info.sourceLocation = String(expr);
-        return info;
+class Cache {
+    constructor(builder) {
+        this.builder = builder;
+        this.map = new Map();
+    }
+
+    get(key) {
+        if (this.map.has(key)) {
+            return this.map.get(key);
+        } else {
+            const item = this.builder(key);
+            this.map.set(key, item);
+            return item;
+        }
+    }
+
+    static make(builder) {
+        const cache = new Cache(builder);
+        return cache.get.bind(cache);
     }
 }
+
+const getExpressionInfo = Cache.make((expr) => {
+    if (typeof expr === 'object') {
+        return expr;
+    }
+    // Keep the reference ID on the info object as we pass it around.
+    // This is a placeholder until we can retain source locations that
+    // make sense (eg against the binary, or against a generated text
+    // disassembly).
+    const info = b.getExpressionInfo(expr);
+    info.sourceLocation = String(expr);
+    return info;
+});
 
 function memoryExpression(expr) {
     const info = getExpressionInfo(expr);
@@ -596,7 +617,7 @@ function memoryExpression(expr) {
     }
 }
 
-function infallible(expr) {
+const infallible = Cache.make((expr) => {
     const info = getExpressionInfo(expr);
     switch (info.id) {
         case b.BlockId:
@@ -656,9 +677,9 @@ function infallible(expr) {
         default:
             throw new Error('Invalid expression id');
     }
-}
+});
 
-function uninterruptible(expr) {
+const uninterruptible = Cache.make((expr) => {
     const info = getExpressionInfo(expr);
     switch (info.id) {
         case b.BlockId:
@@ -702,7 +723,7 @@ function uninterruptible(expr) {
         default:
             throw new Error('Invalid expression id');
     }
-}
+});
 
 // move these into generated code
 
@@ -772,6 +793,69 @@ function popcnt64(n) {
 const reinterpretBuffer = new ArrayBuffer(8);
 const reinterpretView = new DataView(reinterpretBuffer);
 
+let letters = Array.from(range(26)).map((n) => String.fromCharCode(n + "a".charCodeAt(0)));
+function letter(n) {
+    let suffix = '';
+    while (n > 26) {
+        suffix = letters[n % 26] + suffix;
+        n = Math.trunc(n / 26);
+    }
+    return suffix;
+}
+
+class Stack {
+    constructor() {
+        this.items = [];
+        this.maxDepth = 0;
+    }
+
+    get depth() {
+        return this.items.length;
+    }
+
+    get current() {
+        if (this.depth == 0) {
+            throw new RangeError('empty stack');
+        }
+        return this.items[this.depth - 1];
+    }
+
+    get(index) {
+        const u32 = index >>> 0;
+        if (u32 >= this.depth || u32 !== index) {
+            throw new RangeError('invalid index');
+        }
+        return this.stack[u32];
+    }
+
+    push(val) {
+        const depth = this.items.push(val);
+        if (depth > this.maxDepth) {
+            this.maxDepth = depth;
+        }
+        return depth;
+    }
+
+    pop() {
+        if (this.depth == 0) {
+            throw new RangeError('empty stack');
+        }
+        return this.items.pop();
+    }
+
+    block(val, callback) {
+        this.push(val);
+        try {
+            return callback();
+        } finally {
+            this.pop();
+        }
+    }
+
+    find(callback) {
+        return this.items.find(callback);
+    }
+}
 
 class Compiler {
     constructor(instance, params=[], vars=[]) {
@@ -779,11 +863,19 @@ class Compiler {
         this.paramTypes = params.slice();
         this.localDefaults = params.concat(vars).map(defaultValue);
         this.closure = [];
-        this.closureMap = new Map();
+        this.closureMap = Cache.make((val) => {
+            const index = this.closure.push(val) - 1;
+            return 'closure' + index;
+        });
         this.labels = [];
         this.sources = [];
-        this.stack = [];
-        this.maxDepth = 0;
+        this.stack = new Stack();
+        this.optimizedVars = new Map();
+        this.expressions = new Stack();
+        this.optimizedStack = new Stack();
+        this.tempVars = new Stack();
+        this.blocks = new Stack();
+        this.loops = 0;
     }
 
     static compileBase(instance, expr, params, results, vars, name='<anonymous>') {
@@ -792,6 +884,7 @@ class Compiler {
         const paramNames = params.map((_type, index) => `param${index}`);
         const body = compiler.flatten(compiler.compile(expr));
         const hasResult = (results !== b.none);
+        const maxDepth = compiler.stack.maxDepth;
         const func = `
             return async (${paramNames.join(', ')}) => {
                 const instance = ${inst};
@@ -804,8 +897,8 @@ class Compiler {
                     dataView = new DataView(buffer); // @fixme run this through a common cache
                 };
                 ${
-                    compiler.maxDepth
-                    ? `let ${compiler.stackVars(compiler.maxDepth).join(`, `)};`
+                    maxDepth
+                    ? `let ${compiler.stackVars(maxDepth).join(`, `)};`
                     : ``
                 }
                 ${
@@ -818,7 +911,7 @@ class Compiler {
                     const activeBreakpoints = instance._activeBreakpoints;
                     const activeSequences = instance._activeSequences;
                     const stackSpill = [${
-                        Array.from(range(compiler.maxDepth + 1), (_, depth) => {
+                        Array.from(range(maxDepth + 1), (_, depth) => {
                             return `
                                 () => [${compiler.stackVars(depth).join(`, `)}]
                             `;
@@ -835,6 +928,7 @@ class Compiler {
                     frame.sourceLocation = node.sourceLocation;
                     return frame;
                 };
+                // @fixme do this thorugh the exception after all
                 instance._stackTracers.push(dump);
                 try {
                     ${body}
@@ -844,10 +938,8 @@ class Compiler {
                 }
             };
         `;
-        const closureNames = compiler.closure.map((_val, index) => `closure${index}`);
+        const closureNames = compiler.closure.map((val) => compiler.enclose(val));
         const args = closureNames.concat([func]);
-        //console.log({closureNames, closure: compiler.closure})
-        //console.log(func);
         return Reflect.construct(Function, args).apply(null, compiler.closure);
     }
 
@@ -935,13 +1027,10 @@ class Compiler {
         }
     }
 
-    enclose(val) {
-        let index = this.closureMap.get(val);
-        if (index === undefined) {
-            index = this.closure.push(val) - 1;
-            this.closureMap.set(val, index);
-        }
-        return 'closure' + index;
+    enclose(value) {
+        // @fixme replace all of these with
+        // source-compilation-friendly references
+        return this.closureMap(value);
     }
 
     literal(value) {
@@ -957,11 +1046,49 @@ class Compiler {
     }
 
     label(name) {
-        let index = this.labels.indexOf(name);
-        if (index === -1) {
-            index = this.labels.push(name) - 1;
+        if (name) {
+            let index = this.labels.indexOf(name);
+            if (index === -1) {
+                index = this.labels.push(name) - 1;
+            }
+            return 'label' + index;
         }
-        return 'label' + index;
+        return null;
+    }
+
+    outerLoop() {
+        return `loop${this.loops++}`;
+    }
+
+    labelDecl(block) {
+        return block.label ? `${block.label}:` : ``;
+    }
+
+    block(result, name, callback) {
+        const label = this.label(name);
+        const temp = this.temp(result);
+        const block = {
+            result,
+            name,
+            label,
+            temp
+        };
+        this.blocks.push(block);
+        const prefix = this.declareTemp(block);
+        const suffix = this.pushTemp(block);
+        return [prefix, callback(block), suffix].join('\n');
+    }
+
+    findBlock(name) {
+        return this.blocks.find((block) => block.name === name);
+    }
+
+    break(name) {
+        const block = this.findBlock(name);
+        return `
+            ${this.stashTemp(block)}
+            break ${block.label};
+        `;
     }
 
     spill(expr) {
@@ -973,7 +1100,7 @@ class Compiler {
             sourceLocation: expr.sourceLocation
         };
         if (this.instance._debug) {
-            node.depth = this.literal(this.stack.length);
+            node.depth = this.literal(this.stack.depth);
         }
         return `
                 node = ${this.enclose(node)};
@@ -981,25 +1108,69 @@ class Compiler {
     }
 
     opcode(expr, args, builder) {
-        const nodes = args.flatMap((arg) => this.compile(arg));
+        const infal = infallible(expr);
         const spill = this.spill(expr);
-        const stackVars = args.map((_) => this.pop()).reverse();
-        let result;
-        if (expr.type != b.none) {
-            // quick hack for getting the stack variable name
-            // for the value pushed by the opcode
-            this.push();
-            result = this.pop();
-            this.push();
-        }
-        nodes.push({
-            sourceLocation: expr.sourceLocation,
-            uninterruptible: uninterruptible(expr),
-            infallible: infallible(expr),
-            fragment: builder(result, ...stackVars),
-            memory: memoryExpression(expr),
-            spill
+
+        const build = () => this.expressions.block(expr, () => {
+            // Note we use 'args' for block children which
+            // may or may not have return values, so we have
+            // to check them all.
+            const nodes = [];
+            let inputs = 0;
+            for (let arg of args) {
+                const argNodes = this.compile(arg);
+                nodes.push(...argNodes);
+                if (getExpressionInfo(arg).type != b.none) {
+                    inputs++;
+                }
+            }
+            const stackVars = [];
+            for (let _i of range(inputs)) {
+                stackVars.unshift(this.pop());
+            }
+
+            let result;
+            if (expr.type != b.none) {
+                // Get the stack variable name for the value pushed by the opcode
+                result = this.pushVar();
+            }
+            let fragment = builder(result, ...stackVars);
+            nodes.push({
+                sourceLocation: expr.sourceLocation,
+                uninterruptible: uninterruptible(expr),
+                infallible: infal,
+                fragment,
+                optimized: null,
+                memory: memoryExpression(expr),
+                spill
+            });
+            return nodes;
         });
+
+        // First build the full non-optimized code.
+        const nodes = this.optimizedStack.block(false, build);
+
+        // @fixme fix this
+        /*
+        if (infal) {
+            // Our child nodes can't be interrupted or throw.
+            // Re-compile with higher optimizations where possible.
+
+            if (expr.type != b.none) {
+                // Hack: pop the result back off the virtual stack
+                this.pop();
+            }
+
+            const optimized = this.optimizedStack.block(true, build);
+
+            // this feels like a ..... hack
+            nodes.forEach((node, index) => {
+                if (node.infallible) {
+                    node.optimized = optimized[index].fragment;
+                }
+            });
+        }
+        */
 
         return nodes;
     }
@@ -1027,111 +1198,164 @@ class Compiler {
         });
     }
 
-    push(val) {
-        const depth = this.stack.push(true);
+    optimizeVar(name) {
+        let variants;
+        if (this.optimizedVars.has(name)) {
+            variants = this.optimizedVars.get(name);
+        } else {
+            variants = [];
+            this.optimizedVars.set(name, variants)
+        }
+        const index = variants.length;
+        const suffix = letter(index);
+        const opt = `${name}${suffix}`;
+        variants.push(opt);
+        return opt;
+    }
+
+    canOptimize() {
+        return this.optimizedStack.current && infallible(this.expressions.current);
+    }
+
+    pushVar() {
+        const index = this.stack.depth;
+        const name = `stack${index}`;
+
+        const depth = index + 1;
         if (depth > this.maxDepth) {
             this.maxDepth = depth;
         }
-        return `stack${depth - 1} = ${val};`;
+
+        if (this.canOptimize()) {
+            const opt = this.optimizeVar(name);
+            this.stack.push(opt);
+            return `const ${opt}`;
+        } else {
+            this.stack.push(name);
+            return `${name}`;
+        }
     }
 
     pop() {
-        const depth = this.stack.length;
-        this.stack.pop();
-        return `stack${depth - 1}`;
+        return this.stack.pop();
     }
 
-    saveStack() {
-        return this.stack.length;
+    peek() {
+        return this.stack.peek();
     }
 
-    restoreStack(saved, preserve=0) {
-        const depth = this.stack.length;
-        this.stack.splice(saved, (depth - saved) - preserve);
+    stackVar(index) {
+        return this.stack.get(index);
+    }
 
-        const copies = [];
-        for (let i = 0; i < preserve; i++) {
-            copies.push(`stack${saved + i} = stack${(depth - preserve) + i};`);
+    temp(type) {
+        if (type) {
+            const index = this.tempVars.depth;
+            const name = `temp${index}`;
+            this.tempVars.push(name);
+            return name;
         }
-        return copies.join('\n');
+        return null;
+    }
+
+    resultStore(result) {
+        if (result) {
+            return `/* store */ ${result} = ${this.pop()};`;
+        }
+        return ``;
+    }
+
+    declareTemp(block) {
+        if (block.temp) {
+            return `let ${block.temp};`;
+        }
+        return ``;
+    }
+
+    pushTemp(block) {
+        if (block.result) {
+            return `/* pushTemp */ ${block.result} = ${block.temp};`;
+        }
+        return ``;
+    }
+
+    stashTemp(block) {
+        if (block.temp) {
+            const source = this.pop();
+            return `${block.temp} = ${source};`
+        }
+        return ``;
     }
 
     _compileBlock(expr) {
-        let saved;
-        if (expr.name !== '') {
-            let label;
-            return this.opcode(expr, [], (result) => `
+        return this.opcode(expr, [], (result) =>
+            this.block(result, expr.name, (block) => `
+                ${this.labelDecl(block)}
                 {
-                    ${(saved = this.saveStack()), ``}
-                    ${label = this.label(expr.name)}:
-                    do {
-                        ${this.flatten(expr.children.flatMap((expr) => this.compile(expr)))}
-                    } while (false)
-                    ${this.restoreStack(saved, resultCount(expr.type))}
+                    ${this.flatten(
+                        expr.children.flatMap((expr) => this.compile(expr))
+                    )}
+                    ${this.stashTemp(block)}
                 }
-            `);
-        }
-        return this.opcode(expr, expr.children, () => ``);
+            `)
+        );
     }
 
     _compileIf(expr) {
-        return this.opcode(expr, [expr.condition], (result, condition) => `
-            if (${condition}) {
-                ${this.flatten(this.compile(expr.ifTrue))}
-            }
-            ${
-                expr.ifFalse
-                ? `else {
+        let block;
+        return this.opcode(expr, [expr.condition], (result, condition) =>
+            this.block(result, null, (block) => `
+                if (${condition}) {
+                    ${this.flatten(this.compile(expr.ifTrue))}
+                    ${this.stashTemp(block)}
+                } ${expr.ifFalse ? `else {
                     ${this.flatten(this.compile(expr.ifFalse))}
-                }`
-                : ``
-            }
-        `);
+                    ${this.stashTemp(block)}
+                }` : ``}
+            `)
+        );
     }
 
     _compileLoop(expr) {
-        let outer, inner, saved;
-        return this.opcode(expr, [], (result) => `
-            {
-                ${(saved = this.saveStack()), ``}
-                ${outer = this.label(expr.name + '$$loop')}:
+        const outer = this.outerLoop();
+        return this.opcode(expr, [], (result) =>
+            this.block(result, expr.name, (block) => `
+                ${outer}:
                 for (;;) {
-                    ${inner = this.label(expr.name)}:
-                    for (;;) {
+                    ${this.labelDecl(block)}
+                    {
                         ${this.flatten(this.compile(expr.body))}
+                        ${this.stashTemp(block)}
                         break ${outer};
                     }
                 }
-                ${this.restoreStack(saved, resultCount(expr.type))}
-            }
-        `);
+            `)
+        );
     }
 
     _compileBreak(expr) {
-        const breaker = `
-            break ${this.label(expr.name)};
-        `;
         if (expr.condition) {
-            return this.opcode(expr, [expr.condition], (result, condition) => `
+            return this.opcode(expr, [expr.condition], (_result, condition) => `
                 if (${condition}) {
-                    ${breaker}
+                    ${this.break(expr.name)}
                 }
             `);
         } else {
-            return this.opcode(expr, [], () => breaker);
+            return this.opcode(expr, [], (_result) =>
+                this.break(expr.name)
+            );
         }
     }
 
     _compileSwitch(expr) {
-        const labels = expr.names.map((name) => this.label(name));
-        return this.opcode(expr, [expr.condition], (result, condition) => `
+        return this.opcode(expr, [expr.condition], (_result, condition) => `
             switch (${condition}) {
-                ${labels.map((label, index) => `
+                ${expr.names.map((name, index) => `
                     case ${index}:
-                        break ${label};
+                        ${this.break(name)}
                 `).join('\n')}
                 default:
-                    break ${this.label(expr.defaultName)};
+                    ${this.break(expr.defaultName)}
             }
         `);
     }
