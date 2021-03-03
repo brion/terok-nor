@@ -617,7 +617,7 @@ function memoryExpression(expr) {
     }
 }
 
-// returning true for the opcode itself, not the arguments
+// returning true for the opcode itself PLUS all data inputs
 // for blocks the branches/children count.
 const infallible = Cache.make((expr) => {
     const info = getExpressionInfo(expr);
@@ -625,25 +625,32 @@ const infallible = Cache.make((expr) => {
         case b.BlockId:
             return info.children.filter(infallible).length == info.children.length;
         case b.IfId:
-            return infallible(info.ifTrue) &&
-                (!info.ifFalse || infallible(info.true))
+            return infallible(info.condition) &&
+                infallible(info.ifTrue) &&
+                (!info.ifFalse || infallible(info.ifFalse))
         case b.LoopId:
             return infallible(info.body);
         case b.BreakId:
+            return !info.value || infallible(info.value);
         case b.SwitchId:
-            return true
+            return (!info.value || infallible(info.value)) &&
+                infallible(info.condition);
         case b.CallId:
             // @todo analyze all statically linked internal functions
             // and pass through a true if possible
         case b.CallIndirectId:
             return false;
         case b.LocalGetId:
-        case b.LocalSetId:
-        case b.GlobalGetId:
-        case b.GlobalSetId:
             return true;
+        case b.LocalSetId:
+            return infallible(info.value);
+        case b.GlobalGetId:
+            return true;
+        case b.GlobalSetId:
+            return infallible(info.value);
         case b.LoadId:
         case b.StoreId:
+            // Inherently fallible
             return false;
         case b.ConstId:
         case b.UnaryId:
@@ -666,10 +673,11 @@ const infallible = Cache.make((expr) => {
             return true;
         case b.MemoryGrowId:
             // @fixme is this fallible or does it just return 0?
-            return false;
+            return infallible(info.delta);
         case b.NopId:
             return true;
         case b.UnreachableId:
+            // throws a runtime error on purpose :D
             return false;
         default:
             throw new Error('Invalid expression id');
@@ -680,43 +688,62 @@ const uninterruptible = Cache.make((expr) => {
     const info = getExpressionInfo(expr);
     switch (info.id) {
         case b.BlockId:
-            // Note block children are *not* like inputs!
-            // We need to transit them because they happen inside our node's output.
-            //return info.children.filter(uninterruptible).length == info.children.length;
-            return false;
+            return info.children.filter(uninterruptible).length == info.children.length;
         case b.IfId:
-            return false;
-            return uninterruptible(info.ifTrue) &&
-                (!info.ifFalse || uninterruptible(info.true))
+            return uninterruptible(info.condition) &&
+                uninterruptible(info.ifTrue) &&
+                (!info.ifFalse || uninterruptible(info.ifFalse));
         case b.LoopId:
-            return false;
             return uninterruptible(info.body);
         case b.BreakId:
-            return true;
+            return !info.value || uninterruptible(info.value);
         case b.SwitchId:
-            return true;
+            return (!info.value || uninterruptible(info.value)) &&
+                uninterruptible(info.condition);
         case b.CallId:
             // @todo analyze all statically linked internal functions
             // and pass through a true if possible
-            return false;
         case b.CallIndirectId:
+            return false;
         case b.LocalGetId:
+            return true;
         case b.LocalSetId:
+            return uninterruptible(info.value);
         case b.GlobalGetId:
+            return true;
         case b.GlobalSetId:
+            return uninterruptible(info.value);
         case b.LoadId:
+            // Note loads are uninterruptible but they are not infallible
+            // they can throw an exception so might require a stack trace
+            return uninterruptible(info.ptr);
         case b.StoreId:
+            // Note stores are uninterruptible but they are not infallible
+            // they can throw an exception so might require a stack trace
+            return uninterruptible(info.ptr) &&
+                uninterruptible(info.value);
         case b.ConstId:
+            return true;
         case b.UnaryId:
+            return uninterruptible(info.value);
         case b.BinaryId:
+            return uninterruptible(info.left) &&
+                uninterruptible(info.right);
         case b.SelectId:
+            return uninterruptible(info.condition) &&
+                uninterruptible(info.ifTrue) &&
+                uninterruptible(info.ifFalse);
         case b.DropId:
+            return uninterruptible(info.value);
         case b.ReturnId:
+            return !info.value || uninterruptible(info.value);
         case b.MemorySizeId:
+            return true;
         case b.MemoryGrowId:
+            return uninterruptible(info.delta);
         case b.NopId:
         case b.UnreachableId:
-            return true;
+            return false;
         default:
             throw new Error('Invalid expression id');
     }
@@ -882,9 +909,14 @@ class Compiler {
         const compiler = new Compiler(instance, params, vars);
         const inst = compiler.enclose(instance);
         const paramNames = params.map((_type, index) => `param${index}`);
-        const {body, result} = compiler.flatten(compiler.compile(expr));
+        const {
+            body,
+            result,
+            optimizedResult
+        } = compiler.flatten(compiler.compile(expr));
         const hasResult = (results !== b.none);
         const maxDepth = compiler.stack.maxDepth;
+        console.log({body, result});
         const func = `
             return async (${paramNames.join(', ')}) => {
                 const instance = ${inst};
@@ -966,21 +998,16 @@ class Compiler {
     }
 
     flatten(nodes) {
-        let result;
         const cleanPath = (node) => {
-            if (node.result) {
-                result = node.result;
-            }
             if (node.infallible) {
-                return `/* optimized */ ${node.optimized}`;
+                return `/* infallible */ ${node.optimized}`;
+            } else if (node.uninterruptible) {
+                return `/* uninterruptible */ ${node.optimized}`;
             } else {
-                return `/* de-opt */ ${node.spill} ${node.fragment}`;
+                return `/* spill */ ${node.spill} ${node.optimized}`;
             }
         };
         const dirtyPath = (node) => {
-            if (node.result) {
-                result = node.result;
-            }
             return `${node.infallible ? `` : node.spill}
                 if (activeBreakpoints[${this.instance._breakpointIndex(node.sourceLocation)}]) {
                     ${node.infallible ? node.spill : ``}
@@ -1017,8 +1044,14 @@ class Compiler {
                 }
             `;
         };
+        const last = nodes.length ? nodes[nodes.length - 1] : null;
+        const result = last ? last.result : null;
+        const optimizedResult = last ? last.optimizedResult : null;
+        console.log({
+            result,
+            nodes: nodes.map((node) => node)
+        })
         if (this.instance._debug) {
-            let result = null;
             let source = ``;
             const streak = [];
             const spillStreak = () => {
@@ -1038,14 +1071,18 @@ class Compiler {
                 }
             }
             spillStreak();
+            console.log('DIRTY THE RESULT IS', result);
             return {
                 body: source,
-                result
+                result,
+                optimizedResult
             };
         } else {
+            console.log('CLEAN THE RESULT IS', result);
             return {
                 body: nodes.map(cleanPath).join('\n'),
-                result
+                result,
+                optimizedResult
             };
         }
     }
@@ -1098,8 +1135,8 @@ class Compiler {
         };
         this.blocks.push(block);
         const prefix = this.declareTemp(block);
-        const suffix = this.pushTemp(block);
         const content = callback(block);
+        const suffix = this.pushTemp(block);
         if (block.result) {
             // must be stored via stashTemp first!
             this.pop();
@@ -1158,7 +1195,7 @@ class Compiler {
                     stackVars.unshift(this.pop());
                 }
     
-                let result, resultDecl;
+                let result = null, resultDecl = null;
                 if (expr.type != b.none) {
                     // Get the stack variable name for the value pushed by the opcode
                     resultDecl = this.pushVar(expr);
@@ -1192,6 +1229,7 @@ class Compiler {
             const opt = this.optimizedStack.block(true, build);
             nodes.forEach((node, index) => {
                 node.optimized = opt[index].fragment
+                node.optimizedResult = opt[index].result
             });
 
             return nodes;
@@ -1241,8 +1279,8 @@ class Compiler {
         return opt;
     }
 
-    optimizeMode(depth = 0) {
-        return this.optimizedStack.get(depth);
+    optimizeMode() {
+        return this.optimizedStack.current;
     }
 
     canOptimizeResult() {
@@ -1251,16 +1289,23 @@ class Compiler {
             return true;
         }
         if (!this.optimizeMode()) {
+            console.log('not optimize mode')
             // Never optimize in the debug-mode path
             return false;
         }
         if (this.expressions.depth == 0) {
+            console.log('no expressions')
             // No remaining consumer expression
             return false;
         }
         // If the consumer of the result is infallible, they
         // won't need to dump our data on a stacktrace.
-        return infallible(this.expressions.get(-1));
+        if (infallible(this.expressions.get(-1))) {
+            console.log('parent infallible');
+            return true;
+        }
+        console.log('parent not infallible');
+        return false;
     }
 
     pushVar(expr) {
