@@ -911,8 +911,7 @@ class Compiler {
         const paramNames = params.map((_type, index) => `param${index}`);
         const {
             body,
-            result,
-            optimizedResult
+            result
         } = compiler.flatten(compiler.compile(expr));
         const hasResult = (results !== b.none);
         const maxDepth = compiler.stack.maxDepth;
@@ -1000,11 +999,11 @@ class Compiler {
     flatten(nodes) {
         const cleanPath = (node) => {
             if (node.infallible) {
-                return `/* infallible */ ${node.optimized}`;
+                return `/* infallible */ ${node.fragment}`;
             } else if (node.uninterruptible) {
-                return `/* uninterruptible */ ${node.optimized}`;
+                return `/* uninterruptible */ ${node.spill} ${node.fragment}`;
             } else {
-                return `/* spill */ ${node.spill} ${node.optimized}`;
+                return `/* spill */ ${node.spill} ${node.fragment}`;
             }
         };
         const dirtyPath = (node) => {
@@ -1018,7 +1017,7 @@ class Compiler {
                         }
                     ` : ``}
                 }
-                ${node.fragment}
+                ${node.debug}
             `;
         };
         const collapse = (nodes, callback) => {
@@ -1046,7 +1045,6 @@ class Compiler {
         };
         const last = nodes.length ? nodes[nodes.length - 1] : null;
         const result = last ? last.result : null;
-        const optimizedResult = last ? last.optimizedResult : null;
         console.log({
             result,
             nodes: nodes.map((node) => node)
@@ -1074,15 +1072,13 @@ class Compiler {
             console.log('DIRTY THE RESULT IS', result);
             return {
                 body: source,
-                result,
-                optimizedResult
+                result
             };
         } else {
             console.log('CLEAN THE RESULT IS', result);
             return {
                 body: nodes.map(cleanPath).join('\n'),
-                result,
-                optimizedResult
+                result
             };
         }
     }
@@ -1216,24 +1212,25 @@ class Compiler {
                 return nodes;
             };
 
-            // Run everything in de-opt
-            const nodes = this.optimizedStack.block(false, build);
+            const nodes = this.optimizedStack.block(true, build);
 
-            // and also in opt mode
-            if (expr.type != b.none) {
-                // Hack to get the result var off the stack
-                // without polluting state
-                this.stack.pop();
+            if (this.instance._debug) {
+                if (expr.type != b.none) {
+                    // Hack to get the result var off the stack
+                    // without polluting state
+                    this.stack.pop();
+                }
+
+                const debug = this.optimizedStack.block(false, build);
+
+                debug.forEach((node, index) => {
+                    node.debug = debug[index].fragment;
+                    node.debugResult = debug[index].result;
+                });
             }
 
-            const opt = this.optimizedStack.block(true, build);
-            nodes.forEach((node, index) => {
-                node.optimized = opt[index].fragment
-                node.optimizedResult = opt[index].result
-            });
-
             return nodes;
-    });
+         });
     }
 
     vars(base, max) {
