@@ -617,137 +617,263 @@ function memoryExpression(expr) {
     }
 }
 
+
+function filterTree(expr, filter) {
+    const info = getExpressionInfo(expr);
+    if (!expr) {
+        // empty nodes just AND out
+        return true;
+    }
+    if (!filter(expr)) {
+        // shortcut to prune dead trees
+        return false;
+    }
+    function descend(subs) {
+        for (let subexpr of subs) {
+            if (!visit(subexpr, filter)) {
+                return false;
+            }
+        }
+        return true;
+    }
+    switch (info.id) {
+        case b.BlockId:
+            return descend(info.children);
+        case b.IfId:
+            return descend([info.condition, info.ifTrue, info.ifFalse]);
+        case b.LoopId:
+            return descend([info.body]);
+        case b.BreakId:
+            return descend([info.value]);
+        case b.SwitchId:
+            return descend([info.value, info.condition]);
+        case b.CallId:
+            return true;
+        case b.CallIndirectId:
+            return descend([info.target]);
+        case b.LocalGetId:
+            return true;
+        case b.LocalSetId:
+            return descend([info.value]);
+        case b.GlobalGetId:
+            return true;
+        case b.GlobalSetId:
+            return descend([info.value]);
+        case b.LoadId:
+            return descend([info.ptr]);
+        case b.StoreId:
+            return descend([info.ptr, info.value]);
+        case b.ConstId:
+            return true;
+        case b.UnaryId:
+            return descend([info.value]);
+        case b.BinaryId:
+            return descend([info.left, info.right]);
+        case b.SelectId:
+            return descend([info.ifTrue, info.ifFalse, info.condition]);
+        case b.DropId:
+            return descend([info.value]);
+        case b.ReturnId:
+            return descend([info.value]);
+        case b.MemorySizeId:
+            return true;
+        case b.MemoryGrowId:
+            return descend([info.delta]);
+        case b.NopId:
+            return true;
+        case b.UnreachableId:
+            return true;
+        default:
+            throw new Error('Invalid expression id');
+    }
+}
+
+
+const containsBlocks = Cache.make((expr) => {
+    return filterTree(expr, (info) => {
+        switch (info.id) {
+            case b.BlockId:
+            case b.IfId:
+            case b.LoopId:
+                return true;
+            case b.BreakId:
+            case b.SwitchId:
+                return false;
+            case b.CallId:
+            case b.CallIndirectId:
+            case b.LocalGetId:
+            case b.LocalSetId:
+            case b.GlobalGetId:
+            case b.GlobalSetId:
+            case b.LoadId:
+            case b.StoreId:
+            case b.ConstId:
+            case b.UnaryId:
+            case b.BinaryId:
+            case b.SelectId:
+            case b.DropId:
+            case b.ReturnId:
+            case b.MemorySizeId:
+            case b.MemoryGrowId:
+            case b.NopId:
+                return false;
+            case b.UnreachableId:
+                // throwing an exception is a statement lol
+                return true;
+            default:
+                throw new Error('Invalid expression id');
+        
+        }
+    });
+});
+
 // returning true for the opcode itself PLUS all data inputs
 // for blocks the branches/children count.
 const infallible = Cache.make((expr) => {
-    const info = getExpressionInfo(expr);
-    switch (info.id) {
-        case b.BlockId:
-            return info.children.filter(infallible).length == info.children.length;
-        case b.IfId:
-            return infallible(info.condition) &&
-                infallible(info.ifTrue) &&
-                (!info.ifFalse || infallible(info.ifFalse))
-        case b.LoopId:
-            return infallible(info.body);
-        case b.BreakId:
-            return !info.value || infallible(info.value);
-        case b.SwitchId:
-            return (!info.value || infallible(info.value)) &&
-                infallible(info.condition);
-        case b.CallId:
-            // @todo analyze all statically linked internal functions
-            // and pass through a true if possible
-        case b.CallIndirectId:
-            return false;
-        case b.LocalGetId:
-            return true;
-        case b.LocalSetId:
-            return infallible(info.value);
-        case b.GlobalGetId:
-            return true;
-        case b.GlobalSetId:
-            return infallible(info.value);
-        case b.LoadId:
-        case b.StoreId:
-            // Inherently fallible
-            return false;
-        case b.ConstId:
-        case b.UnaryId:
-            // @fixme there may be fallible unary ops like sqrt
-            return true;
-        case b.BinaryId:
-            switch (info.op) {
-                case b.DivSInt32:
-                case b.DivSInt64:
-                case b.DivFloat32:
-                case b.DivFloat64:
-                    return false;
-                default:
-                    return true;
-            }
-        case b.SelectId:
-        case b.DropId:
-        case b.ReturnId:
-        case b.MemorySizeId:
-            return true;
-        case b.MemoryGrowId:
-            // @fixme is this fallible or does it just return 0?
-            return infallible(info.delta);
-        case b.NopId:
-            return true;
-        case b.UnreachableId:
-            // throws a runtime error on purpose :D
-            return false;
-        default:
-            throw new Error('Invalid expression id');
-    }
+    return filterTree(expr, (info) => {
+        switch (info.id) {
+            case b.BlockId:
+                // blocks are not necessarily fallible BUT they must place args on stack
+            case b.IfId:
+            case b.LoopId:
+                return false;
+            case b.BreakId:
+            case b.SwitchId:
+                // note breaks and switches may have values like blocks.
+                // the break though sends its own value *to* the block's
+                // value variable.
+                return true;
+            case b.CallId:
+                // @todo analyze all statically linked internal functions
+                // and pass through a true if possible
+            case b.CallIndirectId:
+                return false;
+            case b.LocalGetId:
+            case b.LocalSetId:
+            case b.GlobalGetId:
+            case b.GlobalSetId:
+                return true;
+            case b.LoadId:
+            case b.StoreId:
+                // Inherently fallible
+                return false;
+            case b.ConstId:
+            case b.UnaryId:
+                // @fixme there may be fallible unary ops like sqrt
+                return true;
+            case b.BinaryId:
+                switch (info.op) {
+                    case b.DivSInt32:
+                    case b.DivSInt64:
+                    case b.DivFloat32:
+                    case b.DivFloat64:
+                        return false;
+                    default:
+                        return true;
+                }
+            case b.SelectId:
+            case b.DropId:
+            case b.ReturnId:
+            case b.MemorySizeId:
+            case b.MemoryGrowId:
+            case b.NopId:
+                return true;
+            case b.UnreachableId:
+                // throws a runtime error on purpose :D
+                return false;
+            default:
+                throw new Error('Invalid expression id');
+        
+        }
+    });
 });
 
 const uninterruptible = Cache.make((expr) => {
-    const info = getExpressionInfo(expr);
-    switch (info.id) {
-        case b.BlockId:
-            return info.children.filter(uninterruptible).length == info.children.length;
-        case b.IfId:
-            return uninterruptible(info.condition) &&
-                uninterruptible(info.ifTrue) &&
-                (!info.ifFalse || uninterruptible(info.ifFalse));
-        case b.LoopId:
-            return uninterruptible(info.body);
-        case b.BreakId:
-            return !info.value || uninterruptible(info.value);
-        case b.SwitchId:
-            return (!info.value || uninterruptible(info.value)) &&
-                uninterruptible(info.condition);
-        case b.CallId:
-            // @todo analyze all statically linked internal functions
-            // and pass through a true if possible
-        case b.CallIndirectId:
-            return false;
-        case b.LocalGetId:
-            return true;
-        case b.LocalSetId:
-            return uninterruptible(info.value);
-        case b.GlobalGetId:
-            return true;
-        case b.GlobalSetId:
-            return uninterruptible(info.value);
-        case b.LoadId:
-            // Note loads are uninterruptible but they are not infallible
-            // they can throw an exception so might require a stack trace
-            return uninterruptible(info.ptr);
-        case b.StoreId:
-            // Note stores are uninterruptible but they are not infallible
-            // they can throw an exception so might require a stack trace
-            return uninterruptible(info.ptr) &&
-                uninterruptible(info.value);
-        case b.ConstId:
-            return true;
-        case b.UnaryId:
-            return uninterruptible(info.value);
-        case b.BinaryId:
-            return uninterruptible(info.left) &&
-                uninterruptible(info.right);
-        case b.SelectId:
-            return uninterruptible(info.condition) &&
-                uninterruptible(info.ifTrue) &&
-                uninterruptible(info.ifFalse);
-        case b.DropId:
-            return uninterruptible(info.value);
-        case b.ReturnId:
-            return !info.value || uninterruptible(info.value);
-        case b.MemorySizeId:
-            return true;
-        case b.MemoryGrowId:
-            return uninterruptible(info.delta);
-        case b.NopId:
-        case b.UnreachableId:
-            return false;
-        default:
-            throw new Error('Invalid expression id');
-    }
+    return filterTree(expr, (info) => {
+        switch (info.id) {
+            case b.BlockId:
+            case b.IfId:
+            case b.LoopId:
+            case b.BreakId:
+            case b.SwitchId:
+                return true;
+            case b.CallId:
+                // @todo analyze all statically linked internal functions
+                // and pass through a true if possible
+            case b.CallIndirectId:
+                return false;
+            case b.LocalGetId:
+            case b.LocalSetId:
+            case b.GlobalGetId:
+            case b.GlobalSetId:
+            case b.LoadId:
+            case b.StoreId:
+            case b.ConstId:
+            case b.UnaryId:
+            case b.BinaryId:
+            case b.SelectId:
+            case b.DropId:
+            case b.ReturnId:
+            case b.MemorySizeId:
+            case b.MemoryGrowId:
+            case b.NopId:
+                return true;
+            case b.UnreachableId:
+                return false;
+            default:
+                throw new Error('Invalid expression id');
+        }
+    })
 });
+
+const argsInOrder = Cache.make((expr) => {
+    return filterTree(expr, (info) => {
+        switch (info.id) {
+            case b.BlockId:
+            case b.IfId:
+            case b.LoopId:
+            case b.BreakId:
+            case b.SwitchId:
+            case b.CallId:
+                return true;
+            case b.CallIndirectId:
+                // the target index comes after the args in Wasm
+                // but the function expression in JS is evaluated before the args
+                // this requires us to use the stack to pass the indirect call opcode args
+                //
+                // however we also need to do that for other reasons in debug mode
+                // because any indirect call could fail or be interrupted by the debugger
+                // interactively
+                return false;
+            case b.LocalGetId:
+            case b.LocalSetId:
+            case b.GlobalGetId:
+            case b.GlobalSetId:
+            case b.LoadId:
+            case b.StoreId:
+            case b.ConstId:
+            case b.UnaryId:
+            case b.BinaryId:
+            case b.SelectId:
+            case b.DropId:
+            case b.ReturnId:
+            case b.MemorySizeId:
+            case b.MemoryGrowId:
+            case b.NopId:
+                return true;
+            case b.UnreachableId:
+                return false;
+            default:
+                throw new Error('Invalid expression id');
+        }
+    })
+});
+
+// Can we optimize from saving
+const canOptimize = Cache.make((expr) => {
+    return uninterruptible(expr) && !containsBlocks(expr) && argsInOrder(expr);
+});
+
 
 // move these into generated code
 
@@ -767,7 +893,7 @@ function ctz64(n) {
     n |= n << 8n;
     n |= n << 4n;
     n |= n << 2n;
-    n |= n << 1;
+    n |= n << 1n;
     const low = BigInt.toIntN(32, n);
     const trailing = 32 - Math.clz(~low);
     if (trailing == 32) {
@@ -814,18 +940,9 @@ function popcnt64(n) {
 }
 
 // move this into instance state maybe?
-const reinterpretBuffer = new ArrayBuffer(8);
+// needs enough space for two 64-bit floats at once for copysign
+const reinterpretBuffer = new ArrayBuffer(16);
 const reinterpretView = new DataView(reinterpretBuffer);
-
-let letters = Array.from(range(26)).map((n) => String.fromCharCode(n + "a".charCodeAt(0)));
-function letter(n) {
-    let suffix = '';
-    do {
-        suffix = letters[n % 26] + suffix;
-        n = Math.trunc(n / 26);
-    } while (n > 0);
-    return suffix;
-}
 
 class Stack {
     constructor() {
@@ -1045,10 +1162,6 @@ class Compiler {
         };
         const last = nodes.length ? nodes[nodes.length - 1] : null;
         const result = last ? last.result : null;
-        console.log({
-            result,
-            nodes: nodes.map((node) => node)
-        })
         if (this.instance._debug) {
             let source = ``;
             const streak = [];
@@ -1069,13 +1182,11 @@ class Compiler {
                 }
             }
             spillStreak();
-            console.log('DIRTY THE RESULT IS', result);
             return {
                 body: source,
                 result
             };
         } else {
-            console.log('CLEAN THE RESULT IS', result);
             return {
                 body: nodes.map(cleanPath).join('\n'),
                 result
@@ -1122,23 +1233,15 @@ class Compiler {
 
     block(result, name, callback) {
         const label = this.label(name);
-        const temp = this.temp(result);
+        const depth = this.blocks.depth;
         const block = {
             result,
             name,
             label,
-            temp
+            depth
         };
         this.blocks.push(block);
-        const prefix = this.declareTemp(block);
-        const content = callback(block);
-        const suffix = this.pushTemp(block);
-        if (block.result) {
-            // must be stored via stashTemp first!
-            this.pop();
-        }
-
-        return [prefix, content, suffix].join('\n');
+        return callback(block);
     }
 
     findBlock(name) {
@@ -1147,10 +1250,21 @@ class Compiler {
 
     break(name) {
         const block = this.findBlock(name);
-        return `
-            ${this.stashTemp(block)}
-            break ${block.label};
-        `;
+        const lines = [];
+        if (block.result) {
+            let result;
+            while (this.blocks.depth > block.depth) {
+                result = this.pop();
+            }
+            if (result !== block.result) {
+                // Don't push the same item in-place,
+                // it's already in the var.
+                lines.push(this.push(result));
+            }
+
+        }
+        lines.push(`break ${block.label};`);
+        return lines.join('\n');
     }
 
     spill(expr) {
@@ -1191,17 +1305,15 @@ class Compiler {
                     stackVars.unshift(this.pop());
                 }
     
-                let result = null, resultDecl = null;
+                let result = null;
                 if (expr.type != b.none) {
                     // Get the stack variable name for the value pushed by the opcode
-                    resultDecl = this.pushVar(expr);
-                    result = this.peek();
+                    result = this.push(expr);
                 }
-                let fragment = builder(resultDecl, ...stackVars);
+                let fragment = builder(result, ...stackVars);
                 nodes.push({
                     stackDepth: this.stack.depth,
                     result,
-                    resultDecl,
                     sourceLocation: expr.sourceLocation,
                     uninterruptible: uninterruptible(expr),
                     infallible: infallible(expr),
@@ -1256,26 +1368,6 @@ class Compiler {
         });
     }
 
-    optimizeVar(name, expr) {
-        //console.log({variant: {expr, name}});
-        let variants;
-        if (this.optimizedVars.has(name)) {
-            variants = this.optimizedVars.get(name);
-        } else {
-            variants = new Map();
-            this.optimizedVars.set(name, variants);
-        }
-        if (variants.has(expr.sourceLocation)) {
-            return variants.get(expr.sourceLocation);
-        }
-        const index = variants.size;
-        const suffix = letter(index);
-        const opt = `${name}${suffix}`;
-        //console.log(`creating var ${opt}`, expr);
-        variants.set(expr.sourceLocation, opt);
-        return opt;
-    }
-
     optimizeMode() {
         return this.optimizedStack.current;
     }
@@ -1286,37 +1378,28 @@ class Compiler {
             return true;
         }
         if (!this.optimizeMode()) {
-            console.log('not optimize mode')
             // Never optimize in the debug-mode path
             return false;
         }
         if (this.expressions.depth == 0) {
-            console.log('no expressions')
             // No remaining consumer expression
             return false;
         }
-        // If the consumer of the result is infallible, they
-        // won't need to dump our data on a stacktrace.
-        if (infallible(this.expressions.get(-1))) {
-            console.log('parent infallible');
+        const parent = this.expressions.get(-1);
+        if (infallible(parent) && inOrder(parent)) {
+            // If the consumer of the result is infallible, they
+            // won't need to dump our data on a stacktrace.
             return true;
         }
-        console.log('parent not infallible');
         return false;
     }
 
-    pushVar(expr) {
+    push(body) {
         const index = this.stack.depth;
         const name = `stack${index}`;
 
-        if (this.canOptimizeResult()) {
-            const opt = this.optimizeVar(name, expr);
-            this.stack.push(opt);
-            return `const ${opt}`;
-        } else {
-            this.stack.push(name);
-            return `${name}`;
-        }
+        this.stack.push(name);
+        return `${name} = ${body};`;
     }
 
     pop() {
@@ -1325,37 +1408,6 @@ class Compiler {
 
     peek() {
         return this.stack.current;
-    }
-
-    temp(type) {
-        if (type) {
-            const index = this.tempVars.depth;
-            const name = `temp${index}`;
-            this.tempVars.push(name);
-            return name;
-        }
-        return null;
-    }
-
-    declareTemp(block) {
-        if (block.temp) {
-            return `let ${block.temp};`;
-        }
-        return ``;
-    }
-
-    pushTemp(block) {
-        if (block.result) {
-            return `/* pushTemp */ ${block.result} = ${block.temp};`;
-        }
-        return ``;
-    }
-
-    stashTemp(block) {
-        if (block.temp) {
-            return `/* stashTemp */ ${block.temp} = ${this.peek()};`
-        }
-        return ``;
     }
 
     _compileBlock(expr) {
@@ -1434,20 +1486,24 @@ class Compiler {
         const func = this.instance._funcs[expr.target];
         const name = this.instance._functionNames.get(func);
         return this.opcode(expr, expr.operands, (result, ...args) => {
-            const call = `await /* ${name} */ ${this.enclose(func)}(${args.join(', ')})`;
-            return result
-                    ? `${result} = ${call};`
-                    : `${call};`;
+            return `await /* ${name} */ ${this.enclose(func)}(${args.join(', ')})`;
         });
     }
 
     _compileCallIndirect(expr) {
-        return this.opcode(expr, [expr.target].concat(expr.operands), (result, target, ...args) => {
+        return this.opcode(expr, [expr.target].concat(expr.operands), (_result, ...args) => {
+            // Note the target gets evaluated last in Wasm
+            // but would be evaluated first in JS code!
+            //
+            // This is safe only because we don't allow optimization
+            // of the indirect call opcode, since it's not uninterruptable
+            // and could change our debugging situation.
+            //
+            // So this means our args array contains stack variables refs,
+            // and not expressions that need to be evaluated in order.
+            const target = args.pop();
             // @todo enforce signature matches
-            const call = `await (table.get(${target}))(${args.join(`, `)})`;
-            return result
-                    ? `${result} = ${call};`
-                    : `${call};`;
+            return `await (table.get(${target})(${args.join(`, `)}))`
         });
     }
 
@@ -1456,60 +1512,67 @@ class Compiler {
     }
 
     global(name) {
+        // @fixme make this work more cleanly for server-side codegen
         return `/* global ${this.literal(name)} */ ${this.enclose(this.instance._globals[name])}`;
     }
 
     _compileLocalGet(expr) {
-        return this.opcode(expr, [], (result) =>
-            `${result} = ${this.local(expr.index)};`
+        return this.opcode(expr, [], (_result) =>
+            this.local(expr.index)
         );
     }
 
     _compileLocalSet(expr) {
-        if (expr.isTee) {
-            return this.opcode(expr, [expr.value], (result, value) => `
-                ${result} = ${this.local(expr.index)} = ${value};
-            `);
-        }
-        return this.opcode(expr, [expr.value], (_result, value) => `
-            ${this.local(expr.index)} = ${value};
-        `);
+        return this.opcode(expr, [expr.value], (_result, value) =>
+            `${this.local(expr.index)} = ${value}`
+        );
     }
 
     _compileGlobalGet(expr) {
-        return this.opcode(expr, [], (result) => `
-            ${result} = ${this.global(expr.name)}.value;
-        `);
+        // @fixme on current globals this requires bigint interop to be on for i64
+        return this.opcode(expr, [], (_result) => 
+            `${this.global(expr.name)}.value`
+        );
     }
 
     _compileGlobalSet(expr) {
-        return this.opcode(expr, [expr.value], (result, value) => `
-            ${this.global(expr.name)}.value = ${value};
-        `);
+        // @fixme on current globals this requires bigint interop to be on for i64
+        return this.opcode(expr, [expr.value], (_result, value) =>
+            `${this.global(expr.name)}.value = ${value}`
+        );
+    }
+
+    memoryAddress(expr, ptr) {
+        // Note the pointer should be treated as 32-bit unsigned
+        // and any offset added to it should make it 33 bits!
+        // Do NOT force back to 32 bits; reading past 4 GiB with
+        // an offset must fail, not wrap around.
+        const base = `(${ptr}) >>> 0`;
+        return expr.offset ? `${base} + ${expr.offset}` : base;
     }
 
     memoryLoad(expr, ptr) {
         const bits = expr.bytes * 8;
         const type = expr.type || getExpressionInfo(expr.value).type;
-        let method;
-        const offset = expr.offset ? `${ptr} + ${expr.offset}` : ptr;
         const signed = (expr.isSigned || expr.bytes == sizeof(type));
+        const offset = this.memoryAddress(expr, ptr);
+
         switch (type) {
             case b.i32:
-            case b.i64:
+            case b.i64: {
                 const big = (type === b.i64) ? `Big` : ``;
-                method = signed ? `get${big}Int${bits}` : `get${big}Uint${bits}`;
-                let call = `dataView.${method}(${offset}, true)`;
+                const flavor = signed ? `Int` : `Uint`;
+                const call = `dataView.get${big}${flavor}${bits}(${offset}, true)`;
                 if (type === b.i64 && bits < 64) {
+                    // Must explicitly promote to BigInt, no auto coercion.
                     return `BigInt(${call})`
-                } else {
-                    return call;
                 }
-                break;
+                return call;
+            }
             case b.f32:
-            case b.f64:
-                method = `getFloat${bits}`
-                return `dataView.${method}(${offset}, true)`
+            case b.f64: {
+                return `dataView.getFloat${bits}(${offset}, true)`
+            }
             default:
                 throw new Error('bad type');
         }
@@ -1518,40 +1581,36 @@ class Compiler {
     memoryStore(expr, ptr, value) {
         const bits = expr.bytes * 8;
         const type = expr.type || getExpressionInfo(expr.value).type;
-        let method;
-        const offset = expr.offset ? `${ptr} + ${expr.offset}` : ptr;
+        const offset = this.memoryAddress(expr, ptr);
+
         switch (type) {
             case b.i32:
-            case b.i64:
+            case b.i64: {
                 const big = (type === b.i64) ? `Big` : ``;
-                method = `set${big}Int${bits}`;
-                let input;
-                if (type === b.i64 && bits < 64) {
-                    input = `Number(BigInt.asIntN(${bits}, ${input}))`
-                } else {
-                    input = value;
-                }
-                let call = `dataView.${method}(${offset}, ${input}, true)`;
+                const input = (type === b.i64 && bits < 64)
+                    ? `Number(BigInt.asIntN(${bits}, ${value}))`
+                    : value;
+                let call = `dataView.set${big}Int${bits}(${offset}, ${input}, true)`;
                 return call;
-                break;
+            }
             case b.f32:
-            case b.f64:
-                method = `setFloat${bits}`
-                return `dataView.${method}(${offset}, ${value}, true)`
+            case b.f64: {
+                return `dataView.setFloat${bits}(${offset}, ${value}, true)`
+            }
             default:
                 throw new Error('bad type');
         }
     }
 
     _compileLoad(expr) {
-        return this.opcode(expr, [expr.ptr], (result, ptr) =>
-            `${result} = ${this.memoryLoad(expr, ptr)};`
+        return this.opcode(expr, [expr.ptr], (_result, ptr) =>
+            this.memoryLoad(expr, ptr)
         );
     }
 
     _compileStore(expr) {
         return this.opcode(expr, [expr.ptr, expr.value], (_result, ptr, value) =>
-            `${this.memoryStore(expr, ptr, value)};`
+            this.memoryStore(expr, ptr, value)
         );
     }
 
@@ -1563,9 +1622,9 @@ class Compiler {
         } else {
             value = expr.value;
         }
-        return this.opcode(expr, [], (result) => `
-            ${result} = ${this.literal(value)};
-        `);
+        return this.opcode(expr, [], (_result) =>
+            this.literal(value)
+        );
     }
     
     unaryOp(op, operand) {
@@ -1681,9 +1740,9 @@ class Compiler {
     }
 
     _compileUnary(expr) {
-        return this.opcode(expr, [expr.value], (result, value) => `
-            ${result} = ${this.unaryOp(expr.op, value)};
-        `);
+        return this.opcode(expr, [expr.value], (_result, value) =>
+            this.unaryOp(expr.op, value)
+        );
     }
 
     binaryOp(op, left, right) {
@@ -1702,7 +1761,7 @@ class Compiler {
             case b.SubInt64:
                 return `BigInt.asIntN(64, ${left} - ${right})`;
             case b.SubFloat32:
-                return `${this.enclose(Math.fround)}(${left} - ${right})`;
+                return `Math.fround(${left} - ${right})`;
             case b.SubFloat64:
                 return `${left} - ${right}`;
 
@@ -1837,8 +1896,9 @@ class Compiler {
                 {
                     const view = this.enclose(reinterpretView);
                     return `/* copysign */
-                        ${view}.setFloat32(0, ${operand}, true),
-                        ${view}.setInt32(0, ${view}.getInt32(0, true) | 0x80000000, true),
+                        ${view}.setFloat32(0, ${left}, true),
+                        ${view}.setFloat32(4, ${right}, true),
+                        ${view}.setUint8(3, (${view}.getUint8(3) & 0x7f) | (${view}.getUint8(7) & 0x80)),
                         ${view}.getFloat32(0, true)
                     `;
                 }
@@ -1846,10 +1906,11 @@ class Compiler {
                 {
                     const view = this.enclose(reinterpretView);
                     return `/* copysign */
-                        ${view}.setFloat64(0, ${operand}, true),
-                        ${view}.setInt32(4, ${view}.getInt32(4, true) | 0x80000000, true),
-                        ${view}.getFloat64(0, true)
-                    `;
+                    ${view}.setFloat64(0, ${left}, true),
+                    ${view}.setFloat64(4, ${right}, true),
+                    ${view}.setUint8(7, (${view}.getUint8(7) & 0x7f) | (${view}.getUint8(15) & 0x80)),
+                    ${view}.getFloat64(0, true)
+                `;
                 }
     
             case b.MinFloat32:
@@ -1865,15 +1926,15 @@ class Compiler {
     }
 
     _compileBinary(expr) {
-        return this.opcode(expr, [expr.left, expr.right], (result, left, right) => `
-            ${result} = ${this.binaryOp(expr.op, left, right)};
-        `);
+        return this.opcode(expr, [expr.left, expr.right], (_result, left, right) =>
+            this.binaryOp(expr.op, left, right)
+        );
     }
 
     _compileSelect(expr) {
-        return this.opcode(expr, [expr.ifTrue, expr.ifFalse, expr.condition], (result, ifTrue, ifFalse, condition) => `
-            ${result} = ${condition} ? ${ifTrue} : ${ifFalse};
-        `);
+        return this.opcode(expr, [expr.ifTrue, expr.ifFalse, expr.condition], (result, ifTrue, ifFalse, condition) =>
+            `${condition} ? ${ifTrue} : ${ifFalse}`
+        );
     }
 
     _compileDrop(expr) {
@@ -1882,23 +1943,24 @@ class Compiler {
 
     _compileMemorySize(expr) {
         const memory = this.enclose(this.instance._memory);
-        return this.opcode(expr, [], (result) => `
-            ${result} = /* memory */ ${memory}.buffer.length / 65536;
-        `);
+        return this.opcode(expr, [], (_result) =>
+            // Don't use 32-bit right-shift because 4 GiB is a legit length
+            `/* memory */ ${memory}.buffer.length / 65536`
+        );
     }
 
     _compileMemoryGrow(expr) {
         // @fixme check for growth requirements on demand in debug path or async
         const memory = this.enclose(this.instance._memory);
-        return this.opcode(expr, [expr.delta], (result, delta) => `
-            ${result} = /* memory */ ${memory}.grow(${delta});
-            instance._updateViews();
-        `);
+        // note instance._updateViews may be needed but we should call that separately
+        return this.opcode(expr, [expr.delta], (_result, delta) =>
+            `/* memory */ ${memory}.grow(${delta})`
+        );
     }
 
     _compileReturn(expr) {
         if (expr.value) {
-            return this.opcode(expr, [expr.value], (result, value) => `
+            return this.opcode(expr, [expr.value], (_result, value) => `
                 return ${value};
             `)
         }
@@ -1912,9 +1974,9 @@ class Compiler {
     }
 
     _compileUnreachable(expr) {
-        return this.opcode(expr, [], () => `
-            throw new WebAssembly.RuntimeError("Unreachable");
-        `);
+        return this.opcode(expr, [], () =>
+            `throw new WebAssembly.RuntimeError("Unreachable");`
+        );
     }
 }
 
