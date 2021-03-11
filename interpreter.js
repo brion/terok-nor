@@ -619,18 +619,18 @@ function memoryExpression(expr) {
 
 
 function filterTree(expr, filter) {
-    const info = getExpressionInfo(expr);
     if (!expr) {
         // empty nodes just AND out
         return true;
     }
-    if (!filter(expr)) {
+    const info = getExpressionInfo(expr);
+    if (!filter(info)) {
         // shortcut to prune dead trees
         return false;
     }
     function descend(subs) {
         for (let subexpr of subs) {
-            if (!visit(subexpr, filter)) {
+            if (!filterTree(subexpr, filter)) {
                 return false;
             }
         }
@@ -689,13 +689,12 @@ function filterTree(expr, filter) {
 }
 
 
-const containsBlocks = Cache.make((expr) => {
+const pureExpression = Cache.make((expr) => {
     return filterTree(expr, (info) => {
         switch (info.id) {
             case b.BlockId:
             case b.IfId:
             case b.LoopId:
-                return true;
             case b.BreakId:
             case b.SwitchId:
                 return false;
@@ -716,10 +715,10 @@ const containsBlocks = Cache.make((expr) => {
             case b.MemorySizeId:
             case b.MemoryGrowId:
             case b.NopId:
-                return false;
+                return true;
             case b.UnreachableId:
                 // throwing an exception is a statement lol
-                return true;
+                return false;
             default:
                 throw new Error('Invalid expression id');
         
@@ -821,7 +820,7 @@ const uninterruptible = Cache.make((expr) => {
             case b.UnreachableId:
                 return false;
             default:
-                throw new Error('Invalid expression id');
+                throw new Error('Invalid expression id' + JSON.stringify(info));
         }
     })
 });
@@ -871,7 +870,7 @@ const argsInOrder = Cache.make((expr) => {
 
 // Can we optimize from saving
 const canOptimize = Cache.make((expr) => {
-    return uninterruptible(expr) && !containsBlocks(expr) && argsInOrder(expr);
+    return uninterruptible(expr) && pureExpression(expr) && argsInOrder(expr);
 });
 
 
@@ -1134,7 +1133,7 @@ class Compiler {
                         }
                     ` : ``}
                 }
-                ${node.debug}
+                ${node.fragment}
             `;
         };
         const collapse = (nodes, callback) => {
@@ -1311,6 +1310,16 @@ class Compiler {
                     result = this.push(expr);
                 }
                 let fragment = builder(result, ...stackVars);
+                let pure = pureExpression(expr);
+                console.log({fragment, result, pure});
+                if (result) {
+                    if (pureExpression(expr)) {
+                        fragment = `${result} = ${fragment};`;
+                    } else {
+                        // ?????
+                    }
+                }
+                console.log({fragment, result, pure});
                 nodes.push({
                     stackDepth: this.stack.depth,
                     result,
@@ -1399,7 +1408,7 @@ class Compiler {
         const name = `stack${index}`;
 
         this.stack.push(name);
-        return `${name} = ${body};`;
+        return name;
     }
 
     pop() {
@@ -1418,24 +1427,23 @@ class Compiler {
                     ${this.flatten(
                         expr.children.flatMap((expr) => this.compile(expr))
                     ).body}
-                    ${this.stashTemp(block)}
                 }
             `)
         );
     }
 
     _compileIf(expr) {
-        return this.opcode(expr, [expr.condition], (result, condition) =>
-            this.block(result, null, (block) => `
-                if (${condition}) {
-                    ${this.flatten(this.compile(expr.ifTrue)).body}
-                    ${this.stashTemp(block)}
-                } ${expr.ifFalse ? `else {
-                    ${this.flatten(this.compile(expr.ifFalse)).body}
-                    ${this.stashTemp(block)}
-                }` : ``}
-            `)
-        );
+        return this.opcode(expr, [expr.condition], (result, condition) => `
+            if (${condition}) {
+                ${this.block(result, null, (_block) => 
+                    this.flatten(this.compile(expr.ifTrue)).body
+                )}
+            } ${expr.ifFalse ? `else {
+                ${this.block(result, null, (_block) =>
+                    this.flatten(this.compile(expr.ifFalse)).body
+                )}
+            }` : ``}
+        `);
     }
 
     _compileLoop(expr) {
@@ -1447,7 +1455,6 @@ class Compiler {
                     ${this.labelDecl(block)}
                     {
                         ${this.flatten(this.compile(expr.body)).body}
-                        ${this.stashTemp(block)}
                         break ${outer};
                     }
                 }
