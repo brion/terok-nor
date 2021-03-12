@@ -700,29 +700,32 @@ const pureExpression = Cache.make((expr) => {
                 return false;
             case b.CallId:
             case b.CallIndirectId:
+                return info.type !== b.none;
             case b.LocalGetId:
+                return true;
             case b.LocalSetId:
+                return info.isTee;
             case b.GlobalGetId:
+                return true;
             case b.GlobalSetId:
+                return false;
             case b.LoadId:
+                return true;
             case b.StoreId:
+                return false;
             case b.ConstId:
             case b.UnaryId:
             case b.BinaryId:
             case b.SelectId:
                 return true;
             case b.DropId:
-                // ??
-                return false;
             case b.ReturnId:
+                return false;
             case b.MemorySizeId:
             case b.MemoryGrowId:
                 return true;
             case b.NopId:
-                // ?? like drop?
-                return false;
             case b.UnreachableId:
-                // throwing an exception is a statement lol
                 return false;
             default:
                 throw new Error('Invalid expression id');
@@ -1040,6 +1043,7 @@ class Compiler {
         const func = `
             return async (${paramNames.join(', ')}) => {
                 const instance = ${inst};
+                const funcs = instance._funcs;
                 const table = instance._table;
                 const memory = instance._memory;
                 let buffer = memory.buffer;
@@ -1120,11 +1124,11 @@ class Compiler {
     flatten(nodes) {
         const cleanPath = (node) => {
             if (node.infallible) {
-                return `/* infallible */ ${node.fragment}`;
+                return `/* infallible */ ${node.statement}`;
             } else if (node.uninterruptible) {
-                return `/* uninterruptible */ ${node.spill} ${node.fragment}`;
+                return `/* uninterruptible */ ${node.spill} ${node.statement}`;
             } else {
-                return `/* spill */ ${node.spill} ${node.fragment}`;
+                return `/* spill */ ${node.spill} ${node.statement}`;
             }
         };
         const dirtyPath = (node) => {
@@ -1138,7 +1142,7 @@ class Compiler {
                         }
                     ` : ``}
                 }
-                ${node.fragment}
+                ${node.statement}
             `;
         };
         const collapse = (nodes, callback) => {
@@ -1322,16 +1326,16 @@ class Compiler {
                     stackVars.unshift(this.pop());
                 }
     
-                let fragment = builder(...stackVars);
-                let pure = pureExpression(expr);
+                const fragment = builder(...stackVars);
+                const pure = pureExpression(expr);
 
                 let result = null;
+                let statement = fragment;
                 if (expr.type != b.none) {
-                    if (pureExpression(expr)) {
+                    if (pure) {
+                        // @todo fold expressions in optimize mode
                         result = this.push();
-                        fragment = `${result} = ${fragment};`;
-                    } else {
-                        // does a push internally
+                        statement = `${result} = ${fragment};`;
                     }
                 }
                 //console.log({fragment, result, pure});
@@ -1341,14 +1345,17 @@ class Compiler {
                     sourceLocation: expr.sourceLocation,
                     uninterruptible: uninterruptible(expr),
                     infallible: infallible(expr),
-                    fragment,
                     memory: memoryExpression(expr),
+                    pure,
+                    fragment,
+                    statement,
                     spill
                 });
                 return nodes;
             };
 
             const nodes = this.optimizedStack.block(true, build);
+            /*
 
             if (this.instance._debug) {
                 if (expr.type != b.none) {
@@ -1364,6 +1371,7 @@ class Compiler {
                     node.debugResult = debug[index].result;
                 });
             }
+            */
 
             return nodes;
          });
@@ -1518,10 +1526,8 @@ class Compiler {
     }
 
     _compileCall(expr) {
-        const func = this.instance._funcs[expr.target];
-        const name = this.instance._functionNames.get(func);
         return this.opcode(expr, expr.operands, (...args) => {
-            return `await /* ${name} */ ${this.enclose(func)}(${args.join(', ')})`;
+            return `await funcs[${this.literal(expr.target)}](${args.join(', ')})`;
         });
     }
 
