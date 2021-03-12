@@ -710,12 +710,17 @@ const pureExpression = Cache.make((expr) => {
             case b.UnaryId:
             case b.BinaryId:
             case b.SelectId:
+                return true;
             case b.DropId:
+                // ??
+                return false;
             case b.ReturnId:
             case b.MemorySizeId:
             case b.MemoryGrowId:
-            case b.NopId:
                 return true;
+            case b.NopId:
+                // ?? like drop?
+                return false;
             case b.UnreachableId:
                 // throwing an exception is a statement lol
                 return false;
@@ -1230,11 +1235,11 @@ class Compiler {
         return block.label ? `${block.label}:` : ``;
     }
 
-    block(result, name, callback) {
+    block(name, callback) {
         const label = this.label(name);
         const depth = this.blocks.depth;
         const block = {
-            result,
+            result = this.expressions.current.result,
             name,
             label,
             depth
@@ -1251,16 +1256,11 @@ class Compiler {
         const block = this.findBlock(name);
         const lines = [];
         if (block.result) {
-            let result;
+            let result = this.pop();
             while (this.blocks.depth > block.depth) {
-                result = this.pop();
+                this.pop();
             }
-            if (result !== block.result) {
-                // Don't push the same item in-place,
-                // it's already in the var.
-                lines.push(this.push(result));
-            }
-
+            this.push(result);
         }
         lines.push(`break ${block.label};`);
         return lines.join('\n');
@@ -1304,19 +1304,16 @@ class Compiler {
                     stackVars.unshift(this.pop());
                 }
     
+                let fragment = builder(...stackVars);
+                let pure = pureExpression(expr);
+
                 let result = null;
                 if (expr.type != b.none) {
-                    // Get the stack variable name for the value pushed by the opcode
-                    result = this.push(expr);
-                }
-                let fragment = builder(result, ...stackVars);
-                let pure = pureExpression(expr);
-                console.log({fragment, result, pure});
-                if (result) {
                     if (pureExpression(expr)) {
+                        result = this.push();
                         fragment = `${result} = ${fragment};`;
                     } else {
-                        // ?????
+                        // does a push internally
                     }
                 }
                 console.log({fragment, result, pure});
@@ -1403,7 +1400,7 @@ class Compiler {
         return false;
     }
 
-    push(body) {
+    push() {
         const index = this.stack.depth;
         const name = `stack${index}`;
 
@@ -1420,8 +1417,10 @@ class Compiler {
     }
 
     _compileBlock(expr) {
-        return this.opcode(expr, [], (result) =>
-            this.block(result, expr.name, (block) => `
+        // @fixme do we need to handle auto-popping behavior at the end of a block, like a break or return?
+        // or would that not happen?
+        return this.opcode(expr, [], () =>
+            this.block(expr.name, (block) => `
                 ${this.labelDecl(block)}
                 {
                     ${this.flatten(
@@ -1433,13 +1432,13 @@ class Compiler {
     }
 
     _compileIf(expr) {
-        return this.opcode(expr, [expr.condition], (result, condition) => `
+        return this.opcode(expr, [expr.condition], (condition) => `
             if (${condition}) {
-                ${this.block(result, null, (_block) => 
+                ${this.block(null, (_block) => 
                     this.flatten(this.compile(expr.ifTrue)).body
                 )}
             } ${expr.ifFalse ? `else {
-                ${this.block(result, null, (_block) =>
+                ${this.block(null, (_block) =>
                     this.flatten(this.compile(expr.ifFalse)).body
                 )}
             }` : ``}
@@ -1448,7 +1447,7 @@ class Compiler {
 
     _compileLoop(expr) {
         const outer = this.outerLoop();
-        return this.opcode(expr, [], (result) =>
+        return this.opcode(expr, [], () =>
             this.block(result, expr.name, (block) => `
                 ${outer}:
                 for (;;) {
@@ -1464,27 +1463,41 @@ class Compiler {
 
     _compileBreak(expr) {
         if (expr.condition) {
-            return this.opcode(expr, [expr.condition], (_result, condition) => `
+            if (expr.value) {
+                return this.opcode(expr, [expr.value, expr.condition], (value, condition) => `
+                    if (${condition}) {
+                        ${this.break(expr.name, value)}
+                    }
+                `);
+            }
+            return this.opcode(expr, [expr.condition], (condition) => `
                 if (${condition}) {
                     ${this.break(expr.name)}
                 }
             `);
-        } else {
-            return this.opcode(expr, [], (_result) =>
-                this.break(expr.name)
+        } else if (expr.value) {
+            return this.opcode(expr, [expr.value], (value) =>
+                this.break(expr.name, value)
             );
         }
+        return this.opcode(expr, [], () =>
+            this.break(expr.name)
+        );
     }
 
     _compileSwitch(expr) {
-        return this.opcode(expr, [expr.condition], (_result, condition) => `
+        const args = [expr.condition];
+        if (expr.value) {
+            args.unshift(expr.value); // @fixme is this right
+        }
+        return this.opcode(expr, args, (condition) => `
             switch (${condition}) {
                 ${expr.names.map((name, index) => `
                     case ${index}:
                         ${this.break(name)}
                 `).join('\n')}
                 default:
-                    ${this.break(expr.defaultName)}
+                    ${this.break(expr.defaultName, expr.value)}
             }
         `);
     }
@@ -1492,13 +1505,13 @@ class Compiler {
     _compileCall(expr) {
         const func = this.instance._funcs[expr.target];
         const name = this.instance._functionNames.get(func);
-        return this.opcode(expr, expr.operands, (result, ...args) => {
+        return this.opcode(expr, expr.operands, (...args) => {
             return `await /* ${name} */ ${this.enclose(func)}(${args.join(', ')})`;
         });
     }
 
     _compileCallIndirect(expr) {
-        return this.opcode(expr, [expr.target].concat(expr.operands), (_result, ...args) => {
+        return this.opcode(expr, [expr.target].concat(expr.operands), (...args) => {
             // Note the target gets evaluated last in Wasm
             // but would be evaluated first in JS code!
             //
@@ -1524,27 +1537,27 @@ class Compiler {
     }
 
     _compileLocalGet(expr) {
-        return this.opcode(expr, [], (_result) =>
+        return this.opcode(expr, [], () =>
             this.local(expr.index)
         );
     }
 
     _compileLocalSet(expr) {
-        return this.opcode(expr, [expr.value], (_result, value) =>
+        return this.opcode(expr, [expr.value], (value) =>
             `${this.local(expr.index)} = ${value}`
         );
     }
 
     _compileGlobalGet(expr) {
         // @fixme on current globals this requires bigint interop to be on for i64
-        return this.opcode(expr, [], (_result) => 
+        return this.opcode(expr, [], () => 
             `${this.global(expr.name)}.value`
         );
     }
 
     _compileGlobalSet(expr) {
         // @fixme on current globals this requires bigint interop to be on for i64
-        return this.opcode(expr, [expr.value], (_result, value) =>
+        return this.opcode(expr, [expr.value], (value) =>
             `${this.global(expr.name)}.value = ${value}`
         );
     }
@@ -1610,13 +1623,13 @@ class Compiler {
     }
 
     _compileLoad(expr) {
-        return this.opcode(expr, [expr.ptr], (_result, ptr) =>
+        return this.opcode(expr, [expr.ptr], (ptr) =>
             this.memoryLoad(expr, ptr)
         );
     }
 
     _compileStore(expr) {
-        return this.opcode(expr, [expr.ptr, expr.value], (_result, ptr, value) =>
+        return this.opcode(expr, [expr.ptr, expr.value], (ptr, value) =>
             this.memoryStore(expr, ptr, value)
         );
     }
@@ -1629,7 +1642,7 @@ class Compiler {
         } else {
             value = expr.value;
         }
-        return this.opcode(expr, [], (_result) =>
+        return this.opcode(expr, [], () =>
             this.literal(value)
         );
     }
@@ -1747,7 +1760,7 @@ class Compiler {
     }
 
     _compileUnary(expr) {
-        return this.opcode(expr, [expr.value], (_result, value) =>
+        return this.opcode(expr, [expr.value], (value) =>
             this.unaryOp(expr.op, value)
         );
     }
@@ -1933,19 +1946,21 @@ class Compiler {
     }
 
     _compileBinary(expr) {
-        return this.opcode(expr, [expr.left, expr.right], (_result, left, right) =>
+        return this.opcode(expr, [expr.left, expr.right], (left, right) =>
             this.binaryOp(expr.op, left, right)
         );
     }
 
     _compileSelect(expr) {
-        return this.opcode(expr, [expr.ifTrue, expr.ifFalse, expr.condition], (result, ifTrue, ifFalse, condition) =>
+        return this.opcode(expr, [expr.ifTrue, expr.ifFalse, expr.condition], (ifTrue, ifFalse, condition) =>
             `${condition} ? ${ifTrue} : ${ifFalse}`
         );
     }
 
     _compileDrop(expr) {
-        return this.opcode(expr, [expr.value], (result) => ``);
+        return this.opcode(expr, [expr.value], (value) => `
+            ${value};
+        `);
     }
 
     _compileMemorySize(expr) {
