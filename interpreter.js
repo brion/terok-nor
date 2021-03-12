@@ -1032,11 +1032,11 @@ class Compiler {
         const paramNames = params.map((_type, index) => `param${index}`);
         const {
             body,
-            result
+            //result // ignore and don't use this
         } = compiler.flatten(compiler.compile(expr));
         const hasResult = (results !== b.none);
         const maxDepth = compiler.stack.maxDepth;
-        console.log({body, result});
+        const result = hasResult ? compiler.pop() : null;
         const func = `
             return async (${paramNames.join(', ')}) => {
                 const instance = ${inst};
@@ -1092,7 +1092,7 @@ class Compiler {
         `;
         const closureNames = compiler.closure.map((val) => compiler.enclose(val));
         const args = closureNames.concat([func]);
-        console.log(func);
+        //console.log(func);
         return Reflect.construct(Function, args).apply(null, compiler.closure);
     }
 
@@ -1334,7 +1334,7 @@ class Compiler {
                         // does a push internally
                     }
                 }
-                console.log({fragment, result, pure});
+                //console.log({fragment, result, pure});
                 nodes.push({
                     stackDepth: this.stack.depth,
                     result,
