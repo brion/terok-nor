@@ -1239,29 +1239,47 @@ class Compiler {
         const label = this.label(name);
         const depth = this.blocks.depth;
         const block = {
-            result = this.expressions.current.result,
+            result: this.expressions.current.result,
             name,
             label,
             depth
         };
         this.blocks.push(block);
-        return callback(block);
+        const body = callback(block);
+        return body;
     }
 
     findBlock(name) {
         return this.blocks.find((block) => block.name === name);
     }
 
+    resetLoop(block) {
+        if (this.stack.depth > block.depth) {
+            // reset the stack for the next loop-through
+            while (this.stack.depth > block.depth) {
+                this.pop();
+            }
+        }
+        return ``;
+    }
+
+    exitBlock(block) {
+        if (block.result && this.stack.depth > block.depth) {
+            // Save the top result, but drop the rest.
+            let oldResult = this.pop();
+            while (this.stack.depth > block.depth) {
+                this.pop();
+            }
+            let result = this.push();
+            return `${result} = ${oldResult};`;
+        }
+        return ``;
+    }
+
     break(name) {
         const block = this.findBlock(name);
         const lines = [];
-        if (block.result) {
-            let result = this.pop();
-            while (this.blocks.depth > block.depth) {
-                this.pop();
-            }
-            this.push(result);
-        }
+        this.exitBlock(block);
         lines.push(`break ${block.label};`);
         return lines.join('\n');
     }
@@ -1426,6 +1444,7 @@ class Compiler {
                     ${this.flatten(
                         expr.children.flatMap((expr) => this.compile(expr))
                     ).body}
+                    ${this.exitBlock(block)}
                 }
             `)
         );
@@ -1434,12 +1453,14 @@ class Compiler {
     _compileIf(expr) {
         return this.opcode(expr, [expr.condition], (condition) => `
             if (${condition}) {
-                ${this.block(null, (_block) => 
-                    this.flatten(this.compile(expr.ifTrue)).body
+                ${this.block(null, (block) => 
+                    this.flatten(this.compile(expr.ifTrue)).body +
+                    this.exitBlock(block)
                 )}
             } ${expr.ifFalse ? `else {
-                ${this.block(null, (_block) =>
-                    this.flatten(this.compile(expr.ifFalse)).body
+                ${this.block(null, (block) =>
+                    this.flatten(this.compile(expr.ifFalse)).body +
+                    this.exitBlock(block)
                 )}
             }` : ``}
         `);
@@ -1448,12 +1469,13 @@ class Compiler {
     _compileLoop(expr) {
         const outer = this.outerLoop();
         return this.opcode(expr, [], () =>
-            this.block(result, expr.name, (block) => `
+            this.block(expr.name, (block) => `
                 ${outer}:
                 for (;;) {
                     ${this.labelDecl(block)}
                     {
                         ${this.flatten(this.compile(expr.body)).body}
+                        ${this.resetLoop(block)}
                         break ${outer};
                     }
                 }
@@ -1462,42 +1484,35 @@ class Compiler {
     }
 
     _compileBreak(expr) {
+        let value = ``;
+        if (expr.value) {
+            // expression whose result to pass through
+            // @fixme make this less awful looking
+            value = this.flatten(this.compile(expr.body)).body;
+        }
         if (expr.condition) {
-            if (expr.value) {
-                return this.opcode(expr, [expr.value, expr.condition], (value, condition) => `
-                    if (${condition}) {
-                        ${this.break(expr.name, value)}
-                    }
-                `);
-            }
             return this.opcode(expr, [expr.condition], (condition) => `
+                ${value}
                 if (${condition}) {
                     ${this.break(expr.name)}
                 }
             `);
-        } else if (expr.value) {
-            return this.opcode(expr, [expr.value], (value) =>
-                this.break(expr.name, value)
-            );
         }
-        return this.opcode(expr, [], () =>
-            this.break(expr.name)
-        );
+        return this.opcode(expr, [], () => `
+            ${value}
+            ${this.break(expr.name)}
+        `);
     }
 
     _compileSwitch(expr) {
-        const args = [expr.condition];
-        if (expr.value) {
-            args.unshift(expr.value); // @fixme is this right
-        }
-        return this.opcode(expr, args, (condition) => `
+        return this.opcode(expr, [expr.condition], (condition) => `
             switch (${condition}) {
                 ${expr.names.map((name, index) => `
                     case ${index}:
                         ${this.break(name)}
                 `).join('\n')}
                 default:
-                    ${this.break(expr.defaultName, expr.value)}
+                    ${this.break(expr.defaultName)}
             }
         `);
     }
